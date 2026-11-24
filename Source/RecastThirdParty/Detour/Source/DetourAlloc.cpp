@@ -16,8 +16,8 @@
 // 3. This notice may not be removed or altered from any source distribution.
 //
 
-#include <stdlib.h>
 #include "DetourAlloc.h"
+#include <stdlib.h>
 
 static void *dtAllocDefault(size_t size, dtAllocHint)
 {

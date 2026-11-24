@@ -6,16 +6,15 @@ public class RecastThirdParty : ModuleRules
     public RecastThirdParty(ReadOnlyTargetRules Target) : base(Target)
     {
         PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        bUseUnity = false;
         
         PublicDependencyModuleNames.AddRange(new string[]
         {
-	        
 	        
         });
         
 	    PrivateDependencyModuleNames.AddRange(new string[] 
 		{
-			
 			
         });
 	    

@@ -16,6 +16,7 @@
 // 3. This notice may not be removed or altered from any source distribution.
 //
 
+#include "DetourNavMeshBuilder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,7 +24,6 @@
 #include "DetourNavMesh.h"
 #include "DetourCommon.h"
 #include "DetourMath.h"
-#include "DetourNavMeshBuilder.h"
 #include "DetourAlloc.h"
 #include "DetourAssert.h"
 
