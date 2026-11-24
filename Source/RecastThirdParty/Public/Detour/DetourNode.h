@@ -33,7 +33,7 @@ static const dtNodeIndex DT_NULL_IDX = (dtNodeIndex)~0;
 
 static const int DT_NODE_PARENT_BITS = 24;
 static const int DT_NODE_STATE_BITS = 2;
-struct dtNode
+struct RECASTTHIRDPARTY_API dtNode
 {
 	float pos[3];								///< Position of the node.
 	float cost;									///< Cost from previous node to current node.
@@ -46,7 +46,7 @@ struct dtNode
 
 static const int DT_MAX_STATES_PER_NODE = 1 << DT_NODE_STATE_BITS;	// number of extra states per node. See dtNode::state
 
-class dtNodePool
+class RECASTTHIRDPARTY_API dtNodePool
 {
 public:
 	dtNodePool(int maxNodes, int hashSize);
@@ -105,7 +105,7 @@ private:
 	int m_nodeCount;
 };
 
-class dtNodeQueue
+class RECASTTHIRDPARTY_API dtNodeQueue
 {
 public:
 	dtNodeQueue(int n);

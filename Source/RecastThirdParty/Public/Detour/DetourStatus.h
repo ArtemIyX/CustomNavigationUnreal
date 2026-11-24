@@ -39,25 +39,25 @@ static const unsigned int DT_ALREADY_OCCUPIED = 1 << 7;	// A tile has already be
 
 
 // Returns true of status is success.
-inline bool dtStatusSucceed(dtStatus status)
+inline RECASTTHIRDPARTY_API bool dtStatusSucceed(dtStatus status)
 {
 	return (status & DT_SUCCESS) != 0;
 }
 
 // Returns true of status is failure.
-inline bool dtStatusFailed(dtStatus status)
+inline RECASTTHIRDPARTY_API bool dtStatusFailed(dtStatus status)
 {
 	return (status & DT_FAILURE) != 0;
 }
 
 // Returns true of status is in progress.
-inline bool dtStatusInProgress(dtStatus status)
+inline RECASTTHIRDPARTY_API bool dtStatusInProgress(dtStatus status)
 {
 	return (status & DT_IN_PROGRESS) != 0;
 }
 
 // Returns true if specific detail is set.
-inline bool dtStatusDetail(dtStatus status, unsigned int detail)
+inline RECASTTHIRDPARTY_API bool dtStatusDetail(dtStatus status, unsigned int detail)
 {
 	return (status & detail) != 0;
 }

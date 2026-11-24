@@ -152,7 +152,7 @@ enum dtPolyTypes
 
 /// Defines a polygon within a dtMeshTile object.
 /// @ingroup detour
-struct dtPoly
+struct RECASTTHIRDPARTY_API dtPoly
 {
 	/// Index to first link in linked list. (Or #DT_NULL_LINK if there is no link.)
 	unsigned int firstLink;
@@ -188,7 +188,7 @@ struct dtPoly
 };
 
 /// Defines the location of detail sub-mesh data within a dtMeshTile.
-struct dtPolyDetail
+struct RECASTTHIRDPARTY_API dtPolyDetail
 {
 	unsigned int vertBase;			///< The offset of the vertices in the dtMeshTile::detailVerts array.
 	unsigned int triBase;			///< The offset of the triangles in the dtMeshTile::detailTris array.
@@ -199,7 +199,7 @@ struct dtPolyDetail
 /// Defines a link between polygons.
 /// @note This structure is rarely if ever used by the end user.
 /// @see dtMeshTile
-struct dtLink
+struct RECASTTHIRDPARTY_API dtLink
 {
 	dtPolyRef ref;					///< Neighbour reference. (The neighbor that is linked to.)
 	unsigned int next;				///< Index of the next link.
@@ -212,7 +212,7 @@ struct dtLink
 /// Bounding volume node.
 /// @note This structure is rarely if ever used by the end user.
 /// @see dtMeshTile
-struct dtBVNode
+struct RECASTTHIRDPARTY_API dtBVNode
 {
 	unsigned short bmin[3];			///< Minimum bounds of the node's AABB. [(x, y, z)]
 	unsigned short bmax[3];			///< Maximum bounds of the node's AABB. [(x, y, z)]
@@ -221,7 +221,7 @@ struct dtBVNode
 
 /// Defines an navigation mesh off-mesh connection within a dtMeshTile object.
 /// An off-mesh connection is a user defined traversable connection made up to two vertices.
-struct dtOffMeshConnection
+struct RECASTTHIRDPARTY_API dtOffMeshConnection
 {
 	/// The endpoints of the connection. [(ax, ay, az, bx, by, bz)]
 	float pos[6];
@@ -246,7 +246,7 @@ struct dtOffMeshConnection
 
 /// Provides high level information related to a dtMeshTile object.
 /// @ingroup detour
-struct dtMeshHeader
+struct RECASTTHIRDPARTY_API dtMeshHeader
 {
 	int magic;				///< Tile magic number. (Used to identify the data format.)
 	int version;			///< Tile data format version number.
@@ -278,7 +278,7 @@ struct dtMeshHeader
 
 /// Defines a navigation mesh tile.
 /// @ingroup detour
-struct dtMeshTile
+struct RECASTTHIRDPARTY_API dtMeshTile
 {
 	unsigned int salt;					///< Counter describing modifications to the tile.
 
@@ -312,7 +312,7 @@ struct dtMeshTile
 /// @param[in]	triFlags		The flags for the triangle (last component of detail vertices above).
 /// @param[in]	edgeIndex		The index of the first vertex of the edge. For instance, if 0,
 ///								returns flags for edge AB.
-inline int dtGetDetailTriEdgeFlags(unsigned char triFlags, int edgeIndex)
+inline RECASTTHIRDPARTY_API int dtGetDetailTriEdgeFlags(unsigned char triFlags, int edgeIndex)
 {
 	return (triFlags >> (edgeIndex * 2)) & 0x3;
 }
@@ -321,7 +321,7 @@ inline int dtGetDetailTriEdgeFlags(unsigned char triFlags, int edgeIndex)
 /// The values are used to allocate space during the initialization of a navigation mesh.
 /// @see dtNavMesh::init()
 /// @ingroup detour
-struct dtNavMeshParams
+struct RECASTTHIRDPARTY_API dtNavMeshParams
 {
 	float orig[3];					///< The world space origin of the navigation mesh's tile space. [(x, y, z)]
 	float tileWidth;				///< The width of each tile. (Along the x-axis.)
@@ -332,7 +332,7 @@ struct dtNavMeshParams
 
 /// A navigation mesh based on tiles of convex polygons.
 /// @ingroup detour
-class dtNavMesh
+class RECASTTHIRDPARTY_API dtNavMesh
 {
 public:
 	dtNavMesh();
@@ -676,12 +676,12 @@ private:
 /// Allocates a navigation mesh object using the Detour allocator.
 /// @return A navigation mesh that is ready for initialization, or null on failure.
 ///  @ingroup detour
-dtNavMesh* dtAllocNavMesh();
+RECASTTHIRDPARTY_API dtNavMesh* dtAllocNavMesh();
 
 /// Frees the specified navigation mesh object using the Detour allocator.
 ///  @param[in]	navmesh		A navigation mesh allocated using #dtAllocNavMesh
 ///  @ingroup detour
-void dtFreeNavMesh(dtNavMesh* navmesh);
+RECASTTHIRDPARTY_API void dtFreeNavMesh(dtNavMesh* navmesh);
 
 #endif // DETOURNAVMESH_H
 

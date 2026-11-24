@@ -28,10 +28,10 @@ typedef void (rcAssertFailFunc)(const char* expression, const char* file, int li
 
 /// Sets the base custom assertion failure callback function to be used by Recast.
 /// @param[in]  assertFailFunc  The function to be used in case of failure of #dtAssert
-void rcAssertFailSetCustom(rcAssertFailFunc* assertFailFunc);
+RECASTTHIRDPARTY_API void rcAssertFailSetCustom(rcAssertFailFunc* assertFailFunc);
 
 /// Gets the base custom assertion failure function to be used by Recast.
-rcAssertFailFunc* rcAssertFailGetCustom();
+RECASTTHIRDPARTY_API rcAssertFailFunc* rcAssertFailGetCustom();
 
 #ifdef RC_DISABLE_ASSERTS
 // From https://web.archive.org/web/20210117002833/http://cnicholson.net/2009/02/stupid-c-tricks-adventures-in-assert/

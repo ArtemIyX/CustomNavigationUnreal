@@ -48,21 +48,21 @@ typedef void (rcFreeFunc)(void* ptr);
 /// @param[in]    allocFunc  The memory allocation function to be used by #rcAlloc
 /// @param[in]    freeFunc   The memory de-allocation function to be used by #rcFree
 /// @see rcAlloc, rcFree
-void rcAllocSetCustom(rcAllocFunc *allocFunc, rcFreeFunc *freeFunc);
+RECASTTHIRDPARTY_API void rcAllocSetCustom(rcAllocFunc *allocFunc, rcFreeFunc *freeFunc);
 
 /// Allocates a memory block.
 /// @param[in]    size  The size, in bytes of memory, to allocate.
 /// @param[in]    hint  A hint to the allocator on how long the memory is expected to be in use.
 /// @return A pointer to the beginning of the allocated memory block, or null if the allocation failed.
 /// @see rcFree, rcAllocSetCustom
-void* rcAlloc(size_t size, rcAllocHint hint);
+RECASTTHIRDPARTY_API void* rcAlloc(size_t size, rcAllocHint hint);
 
 /// Deallocates a memory block.  If @p ptr is NULL, this does nothing.
 /// @warning This function leaves the value of @p ptr unchanged.  So it still
 /// points to the same (now invalid) location, and not to null.
 /// @param[in]    ptr  A pointer to a memory block previously allocated using #rcAlloc.
 /// @see rcAlloc, rcAllocSetCustom
-void rcFree(void* ptr);
+RECASTTHIRDPARTY_API void rcFree(void* ptr);
 
 /// An implementation of operator new usable for placement new. The default one is part of STL (which we don't use).
 /// rcNewTag is a dummy type used to differentiate our operator from the STL one, in case users import both Recast
@@ -95,7 +95,7 @@ typedef intptr_t rcSizeType;
 ///  * push_back() and resize() support adding values from the current vector. Range-based constructors and assign(begin, end) do not.
 ///  * No specialization for bool.
 template <typename T, rcAllocHint H>
-class rcVectorBase
+class RECASTTHIRDPARTY_API rcVectorBase
 {
 	rcSizeType m_size;
 	rcSizeType m_cap;
@@ -163,7 +163,7 @@ class rcVectorBase
 };
 
 template<typename T, rcAllocHint H>
-bool rcVectorBase<T, H>::reserve(rcSizeType count)
+RECASTTHIRDPARTY_API bool rcVectorBase<T, H>::reserve(rcSizeType count)
 {
 	if (count <= m_cap)
 	{
@@ -184,7 +184,7 @@ bool rcVectorBase<T, H>::reserve(rcSizeType count)
 }
 
 template <typename T, rcAllocHint H>
-T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
+RECASTTHIRDPARTY_API T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
 {
 	rcAssert(RC_SIZE_MAX / static_cast<rcSizeType>(sizeof(T)) >= size);
 	T* new_data = static_cast<T*>(rcAlloc(sizeof(T) * size, H));
@@ -196,7 +196,7 @@ T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
 }
 
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::assign(const T* begin, const T* end)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::assign(const T* begin, const T* end)
 {
 	clear();
 	reserve(end - begin);
@@ -205,7 +205,7 @@ void rcVectorBase<T, H>::assign(const T* begin, const T* end)
 }
 
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::push_back(const T& value)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::push_back(const T& value)
 {
 	// rcLikely increases performance by ~50% on BM_rcVector_PushPreallocated,
 	// and by ~2-5% on BM_rcVector_Push.
@@ -228,7 +228,7 @@ void rcVectorBase<T, H>::push_back(const T& value)
 }
 
 template <typename T, rcAllocHint H>
-rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType min_capacity)
+RECASTTHIRDPARTY_API rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType min_capacity)
 {
 	rcAssert(min_capacity <= RC_SIZE_MAX);
 	if (rcUnlikely(m_cap >= RC_SIZE_MAX / 2))
@@ -239,7 +239,7 @@ rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType min_capacity)
 }
 
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::resize_impl(rcSizeType size, const T* value)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::resize_impl(rcSizeType size, const T* value)
 {
 	if (size < m_size)
 	{
@@ -284,7 +284,7 @@ void rcVectorBase<T, H>::resize_impl(rcSizeType size, const T* value)
 }
 
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
 {
 	// TODO: Reorganize headers so we can use rcSwap here.
 	rcSizeType tmp_cap = other.m_cap;
@@ -302,7 +302,7 @@ void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
 
 // static
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::construct_range(T* begin, T* end)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end)
 {
 	for (T* p = begin; p < end; p++)
 	{
@@ -312,7 +312,7 @@ void rcVectorBase<T, H>::construct_range(T* begin, T* end)
 
 // static
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::construct_range(T* begin, T* end, const T& value)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end, const T& value)
 {
 	for (T* p = begin; p < end; p++)
 	{
@@ -322,7 +322,7 @@ void rcVectorBase<T, H>::construct_range(T* begin, T* end, const T& value)
 
 // static
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::copy_range(T* dst, const T* begin, const T* end)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::copy_range(T* dst, const T* begin, const T* end)
 {
 	for (rcSizeType i = 0 ; i < end - begin; i++)
 	{
@@ -331,7 +331,7 @@ void rcVectorBase<T, H>::copy_range(T* dst, const T* begin, const T* end)
 }
 
 template <typename T, rcAllocHint H>
-void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rcSizeType end)
+RECASTTHIRDPARTY_API void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rcSizeType end)
 {
 	for (rcSizeType i = begin; i < end; i++)
 	{
@@ -340,7 +340,7 @@ void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rcSizeType end)
 }
 
 template <typename T>
-class rcTempVector : public rcVectorBase<T, RC_ALLOC_TEMP>
+class RECASTTHIRDPARTY_API rcTempVector : public rcVectorBase<T, RC_ALLOC_TEMP>
 {
 	typedef rcVectorBase<T, RC_ALLOC_TEMP> Base;
 public:
@@ -352,7 +352,7 @@ public:
 };
 
 template <typename T>
-class rcPermVector : public rcVectorBase<T, RC_ALLOC_PERM>
+class RECASTTHIRDPARTY_API rcPermVector : public rcVectorBase<T, RC_ALLOC_PERM>
 {
 	typedef rcVectorBase<T, RC_ALLOC_PERM> Base;
 public:
@@ -365,7 +365,7 @@ public:
 
 /// A simple helper class used to delete an array when it goes out of scope.
 /// @note This class is rarely if ever used by the end user.
-template<class T> class rcScopedDelete
+template<class T> class RECASTTHIRDPARTY_API rcScopedDelete
 {
 	T* ptr;
 public:

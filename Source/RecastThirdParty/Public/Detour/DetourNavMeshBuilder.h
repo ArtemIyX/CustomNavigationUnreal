@@ -23,7 +23,7 @@
 
 /// Represents the source data used to build an navigation mesh tile.
 /// @ingroup detour
-struct dtNavMeshCreateParams
+struct RECASTTHIRDPARTY_API dtNavMeshCreateParams
 {
 
 	/// @name Polygon Mesh Attributes
@@ -110,17 +110,17 @@ struct dtNavMeshCreateParams
 ///  @param[out]	outData		The resulting tile data.
 ///  @param[out]	outDataSize	The size of the tile data array.
 /// @return True if the tile data was successfully created.
-bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData, int* outDataSize);
+RECASTTHIRDPARTY_API bool dtCreateNavMeshData(dtNavMeshCreateParams* params, unsigned char** outData, int* outDataSize);
 
 /// Swaps the endianness of the tile data's header (#dtMeshHeader).
 ///  @param[in,out]	data		The tile data array.
 ///  @param[in]		dataSize	The size of the data array.
-bool dtNavMeshHeaderSwapEndian(unsigned char* data, const int dataSize);
+RECASTTHIRDPARTY_API bool dtNavMeshHeaderSwapEndian(unsigned char* data, const int dataSize);
 
 /// Swaps endianness of the tile data.
 ///  @param[in,out]	data		The tile data array.
 ///  @param[in]		dataSize	The size of the data array.
-bool dtNavMeshDataSwapEndian(unsigned char* data, const int dataSize);
+RECASTTHIRDPARTY_API bool dtNavMeshDataSwapEndian(unsigned char* data, const int dataSize);
 
 #endif // DETOURNAVMESHBUILDER_H
 

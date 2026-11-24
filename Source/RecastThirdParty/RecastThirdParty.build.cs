@@ -5,7 +5,7 @@ public class RecastThirdParty : ModuleRules
 {
     public RecastThirdParty(ReadOnlyTargetRules Target) : base(Target)
     {
-        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        //PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
         bUseUnity = false;
         
         PublicDependencyModuleNames.AddRange(new string[]
@@ -15,13 +15,15 @@ public class RecastThirdParty : ModuleRules
         
 	    PrivateDependencyModuleNames.AddRange(new string[] 
 		{
-			
+			"Core",
+			"CoreUObject",
+			"Engine"
         });
 	    
 	    PublicIncludePaths.AddRange( new string[]
 	    {
-		    Path.Combine(ModuleDirectory, "Detour/Include"),
-		    Path.Combine(ModuleDirectory, "Recast/Include")
+		    Path.Combine(ModuleDirectory, "Public/Detour"),
+		    Path.Combine(ModuleDirectory, "Public/Recast")
 	    });
     }
 }
