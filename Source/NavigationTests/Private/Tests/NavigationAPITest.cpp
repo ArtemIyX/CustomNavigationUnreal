@@ -13,113 +13,79 @@
 DEFINE_LOG_CATEGORY_STATIC(LogRecastAPITest, Log, All);
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-	FNavigationAPITest,
-	"CustomNavigation.API",
+	FRecastAPITest,
+	"CustomNavigation.API.Recast",
 	EAutomationTestFlags::EditorContext |
 	EAutomationTestFlags::EngineFilter
 )
 
-bool FNavigationAPITest::RunTest(const FString& Parameters)
+bool FRecastAPITest::RunTest(const FString& Parameters)
 {
-	UE_LOG(LogRecastAPITest, Warning, TEXT("=== RecastThirdParty API Link + Runtime Test START ==="));
+	UE_LOG(LogRecastAPITest, Warning, TEXT("=== Recast API Link + Runtime Test START ==="));
 
 	// Allocators
-	auto p_rcAlloc              = &rcAlloc;
-	auto p_rcFree               = &rcFree;
-	auto p_rcAllocSetCustom     = &rcAllocSetCustom;
-	auto p_dtAlloc              = &dtAlloc;
-	auto p_dtFree               = &dtFree;
-	auto p_dtAllocSetCustom     = &dtAllocSetCustom;
+	auto p_rcAlloc = &rcAlloc;
+	auto p_rcFree = &rcFree;
+	auto p_rcAllocSetCustom = &rcAllocSetCustom;
 
 	// Assert
 	auto p_rcAssertFailSetCustom = &rcAssertFailSetCustom;
-	auto p_dtAssertFailSetCustom = &dtAssertFailSetCustom;
-	auto p_dtAssertFailGetCustom = &dtAssertFailGetCustom;
 
 	// Heightfield / Compact / Contours / PolyMesh
-	auto p_rcAllocHeightfield           = &rcAllocHeightfield;
-	auto p_rcFreeHeightField            = &rcFreeHeightField;
-	auto p_rcCreateHeightfield          = &rcCreateHeightfield;
-	auto p_rcAllocCompactHeightfield    = &rcAllocCompactHeightfield;
-	auto p_rcFreeCompactHeightfield     = &rcFreeCompactHeightfield;
-	auto p_rcBuildCompactHeightfield    = &rcBuildCompactHeightfield;
-	auto p_rcAllocContourSet            = &rcAllocContourSet;
-	auto p_rcFreeContourSet             = &rcFreeContourSet;
-	auto p_rcBuildContours              = &rcBuildContours;
-	auto p_rcAllocPolyMesh              = &rcAllocPolyMesh;
-	auto p_rcFreePolyMesh               = &rcFreePolyMesh;
-	auto p_rcBuildPolyMesh              = &rcBuildPolyMesh;
-	auto p_rcAllocPolyMeshDetail        = &rcAllocPolyMeshDetail;
-	auto p_rcFreePolyMeshDetail         = &rcFreePolyMeshDetail;
-	auto p_rcBuildPolyMeshDetail        = &rcBuildPolyMeshDetail;
-	auto p_rcAllocHeightfieldLayerSet   = &rcAllocHeightfieldLayerSet;
-	auto p_rcFreeHeightfieldLayerSet    = &rcFreeHeightfieldLayerSet;
-	auto p_rcBuildHeightfieldLayers     = &rcBuildHeightfieldLayers;
+	auto p_rcAllocHeightfield = &rcAllocHeightfield;
+	auto p_rcFreeHeightField = &rcFreeHeightField;
+	auto p_rcCreateHeightfield = &rcCreateHeightfield;
+	auto p_rcAllocCompactHeightfield = &rcAllocCompactHeightfield;
+	auto p_rcFreeCompactHeightfield = &rcFreeCompactHeightfield;
+	auto p_rcBuildCompactHeightfield = &rcBuildCompactHeightfield;
+	auto p_rcAllocContourSet = &rcAllocContourSet;
+	auto p_rcFreeContourSet = &rcFreeContourSet;
+	auto p_rcBuildContours = &rcBuildContours;
+	auto p_rcAllocPolyMesh = &rcAllocPolyMesh;
+	auto p_rcFreePolyMesh = &rcFreePolyMesh;
+	auto p_rcBuildPolyMesh = &rcBuildPolyMesh;
+	auto p_rcAllocPolyMeshDetail = &rcAllocPolyMeshDetail;
+	auto p_rcFreePolyMeshDetail = &rcFreePolyMeshDetail;
+	auto p_rcBuildPolyMeshDetail = &rcBuildPolyMeshDetail;
+	auto p_rcAllocHeightfieldLayerSet = &rcAllocHeightfieldLayerSet;
+	auto p_rcFreeHeightfieldLayerSet = &rcFreeHeightfieldLayerSet;
+	auto p_rcBuildHeightfieldLayers = &rcBuildHeightfieldLayers;
 
 	// Rasterization / Filtering / Areas
-	auto p_rcRasterizeTriangle          = &rcRasterizeTriangle;
-	bool (*p_rcRasterizeTriangles)( rcContext*, const float*, const int, const int*,
-	const unsigned char*, const int, rcHeightfield&, const int) = &rcRasterizeTriangles;
+	auto p_rcRasterizeTriangle = &rcRasterizeTriangle;
+	bool (*p_rcRasterizeTriangles)(rcContext*, const float*, const int, const int*,
+	                               const unsigned char*, const int, rcHeightfield&, const int) = &rcRasterizeTriangles;
 	auto p_rcFilterLowHangingWalkableObstacles = &rcFilterLowHangingWalkableObstacles;
-	auto p_rcFilterLedgeSpans           = &rcFilterLedgeSpans;
+	auto p_rcFilterLedgeSpans = &rcFilterLedgeSpans;
 	auto p_rcFilterWalkableLowHeightSpans = &rcFilterWalkableLowHeightSpans;
-	auto p_rcErodeWalkableArea          = &rcErodeWalkableArea;
-	auto p_rcMedianFilterWalkableArea   = &rcMedianFilterWalkableArea;
-	auto p_rcMarkWalkableTriangles      = &rcMarkWalkableTriangles;
-	auto p_rcClearUnwalkableTriangles   = &rcClearUnwalkableTriangles;
-	auto p_rcMarkBoxArea                = &rcMarkBoxArea;
-	auto p_rcMarkConvexPolyArea         = &rcMarkConvexPolyArea;
-	auto p_rcMarkCylinderArea           = &rcMarkCylinderArea;
+	auto p_rcErodeWalkableArea = &rcErodeWalkableArea;
+	auto p_rcMedianFilterWalkableArea = &rcMedianFilterWalkableArea;
+	auto p_rcMarkWalkableTriangles = &rcMarkWalkableTriangles;
+	auto p_rcClearUnwalkableTriangles = &rcClearUnwalkableTriangles;
+	auto p_rcMarkBoxArea = &rcMarkBoxArea;
+	auto p_rcMarkConvexPolyArea = &rcMarkConvexPolyArea;
+	auto p_rcMarkCylinderArea = &rcMarkCylinderArea;
 
 	// Regions / Distance field
-	auto p_rcBuildDistanceField         = &rcBuildDistanceField;
-	auto p_rcBuildRegions               = &rcBuildRegions;
-	auto p_rcBuildRegionsMonotone       = &rcBuildRegionsMonotone;
-	auto p_rcBuildLayerRegions          = &rcBuildLayerRegions;
+	auto p_rcBuildDistanceField = &rcBuildDistanceField;
+	auto p_rcBuildRegions = &rcBuildRegions;
+	auto p_rcBuildRegionsMonotone = &rcBuildRegionsMonotone;
+	auto p_rcBuildLayerRegions = &rcBuildLayerRegions;
 
 	// Merge / Copy
-	auto p_rcCopyPolyMesh               = &rcCopyPolyMesh;
-	auto p_rcMergePolyMeshes            = &rcMergePolyMeshes;
-	auto p_rcMergePolyMeshDetails       = &rcMergePolyMeshDetails;
+	auto p_rcCopyPolyMesh = &rcCopyPolyMesh;
+	auto p_rcMergePolyMeshes = &rcMergePolyMeshes;
+	auto p_rcMergePolyMeshDetails = &rcMergePolyMeshDetails;
 
 	// Utility
-	auto p_rcCalcBounds                 = &rcCalcBounds;
-	auto p_rcCalcGridSize               = &rcCalcGridSize;
+	auto p_rcCalcBounds = &rcCalcBounds;
+	auto p_rcCalcGridSize = &rcCalcGridSize;
 
-	// Detour NavMesh
-	auto p_dtAllocNavMesh               = &dtAllocNavMesh;
-	auto p_dtFreeNavMesh                = &dtFreeNavMesh;
-	auto p_dtCreateNavMeshData          = &dtCreateNavMeshData;
-	auto p_dtNavMeshHeaderSwapEndian    = &dtNavMeshHeaderSwapEndian;
-	auto p_dtNavMeshDataSwapEndian      = &dtNavMeshDataSwapEndian;
-
-	// Detour Query
-	auto p_dtAllocNavMeshQuery          = &dtAllocNavMeshQuery;
-	auto p_dtFreeNavMeshQuery           = &dtFreeNavMeshQuery;
-
-	// Detour Common (не-inline)
-	auto p_dtClosestPtPointTriangle     = &dtClosestPtPointTriangle;
-	auto p_dtClosestHeightPointTriangle = &dtClosestHeightPointTriangle;
-	auto p_dtIntersectSegmentPoly2D     = &dtIntersectSegmentPoly2D;
-	auto p_dtIntersectSegSeg2D          = &dtIntersectSegSeg2D;
-	auto p_dtPointInPolygon             = &dtPointInPolygon;
-	auto p_dtDistancePtPolyEdgesSqr     = &dtDistancePtPolyEdgesSqr;
-	auto p_dtCalcPolyCenter             = &dtCalcPolyCenter;
-	auto p_dtOverlapPolyPoly2D          = &dtOverlapPolyPoly2D;
-	auto p_dtRandomPointInConvexPoly    = &dtRandomPointInConvexPoly;
-
-	// Чтобы компилятор точно не выкинул указатели
 	volatile uintptr_t ForceLink =
-	(uintptr_t)p_rcAlloc +
-	(uintptr_t)p_dtAlloc +
-	(uintptr_t)p_rcAllocHeightfield +
-	(uintptr_t)p_dtAllocNavMesh +
-	(uintptr_t)p_dtAllocNavMeshQuery +
-	(uintptr_t)p_rcBuildCompactHeightfield +
-	(uintptr_t)p_rcBuildPolyMesh +
-	(uintptr_t)p_dtCreateNavMeshData +
-	(uintptr_t)p_dtClosestPtPointTriangle;
-
+		(uintptr_t)p_rcAlloc +
+		(uintptr_t)p_rcAllocHeightfield +
+		(uintptr_t)p_rcBuildCompactHeightfield +
+		(uintptr_t)p_rcBuildPolyMesh;
 	(void)ForceLink;
 
 	UE_LOG(LogRecastAPITest, Log, TEXT("Link-time symbols resolved OK"));
@@ -138,18 +104,6 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 		{
 			rcFree(ptr);
 			UE_LOG(LogRecastAPITest, Log, TEXT("rcAlloc / rcFree OK"));
-		}
-
-		ptr = dtAlloc(64, DT_ALLOC_PERM);
-		if (!ptr)
-		{
-			UE_LOG(LogRecastAPITest, Error, TEXT("dtAlloc failed"));
-			bAllOk = false;
-		}
-		else
-		{
-			dtFree(ptr);
-			UE_LOG(LogRecastAPITest, Log, TEXT("dtAlloc / dtFree OK"));
 		}
 	}
 
@@ -258,6 +212,39 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 		}
 	}
 
+	return bAllOk;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(
+	FDetourAPITest,
+	"CustomNavigation.API.Detour",
+	EAutomationTestFlags::EditorContext |
+	EAutomationTestFlags::EngineFilter
+)
+
+bool FDetourAPITest::RunTest(const FString& Parameters)
+{
+	// Force references to representative Detour symbols through the linker.
+	volatile uintptr_t ForceLink =
+		(uintptr_t)&dtAlloc +
+		(uintptr_t)&dtAllocNavMesh +
+		(uintptr_t)&dtAllocNavMeshQuery +
+		(uintptr_t)&dtCreateNavMeshData +
+		(uintptr_t)&dtClosestPtPointTriangle;
+	(void)ForceLink;
+
+	bool bAllOk = true;
+	void* ptr = dtAlloc(64, DT_ALLOC_PERM);
+	if (!ptr)
+	{
+		UE_LOG(LogRecastAPITest, Error, TEXT("dtAlloc failed"));
+		bAllOk = false;
+	}
+	else
+	{
+		dtFree(ptr);
+	}
+
 	// --- Detour NavMesh ---
 	{
 		dtNavMesh* nav = dtAllocNavMesh();
@@ -289,13 +276,15 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 	}
 
 	{
-		float a[3] = { 0,0,0 };
-		float b[3] = { 1,0,0 };
-		float c[3] = { 0,0,1 };
+		float a[3] = {0, 0, 0};
+		float b[3] = {1, 0, 0};
+		float c[3] = {0, 0, 1};
 		float closest[3];
 		dtClosestPtPointTriangle(closest, a, a, b, c);
-		UE_LOG(LogRecastAPITest, Log, TEXT("dtClosestPtPointTriangle OK"));
+		TestEqual(TEXT("Closest point X"), closest[0], 0.0f);
+		TestEqual(TEXT("Closest point Y"), closest[1], 0.0f);
+		TestEqual(TEXT("Closest point Z"), closest[2], 0.0f);
 	}
-	
+
 	return bAllOk;
 }
