@@ -155,7 +155,7 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 
 	// --- Context ---
 	{
-		rcContext* ctx = new rcContext(false); // false = без логов
+		rcContext* ctx = new rcContext(false);
 		if (!ctx)
 		{
 			UE_LOG(LogRecastAPITest, Error, TEXT("rcContext allocation failed"));
@@ -299,7 +299,7 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 
 	if (bAllOk)
 	{
-		UE_LOG(LogRecastAPITest, Warning, TEXT("=== ALL RecastThirdParty API tests PASSED ==="));
+		UE_LOG(LogRecastAPITest, Log, TEXT("=== ALL RecastThirdParty API tests PASSED ==="));
 	}
 	else
 	{
