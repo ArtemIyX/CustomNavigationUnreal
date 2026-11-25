@@ -20,24 +20,14 @@
 			"LoadingPhase": "Default"
 		},
 		{
-			"Name": "DedicatedHost",
+			"Name": "RecastThirdParty",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
 		},
 		{
-			"Name": "OnlineSessionsFacade",
-			"Type": "Runtime",
+			"Name": "NavigationTests",
+			"Type": "UncookedOnly",
 			"LoadingPhase": "Default"
-		}
-	],
-	"Plugins": [
-		{
-			"Name": "OnlineSubsystem",
-			"Enabled": true
-		},
-		{
-			"Name": "OnlineSubsystemUtils",
-			"Enabled": true
 		}
 	]
 }
