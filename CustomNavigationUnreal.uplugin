@@ -23,6 +23,11 @@
 			"Name": "RecastThirdParty",
 			"Type": "Runtime",
 			"LoadingPhase": "Default"
+		},
+		{
+			"Name": "NavigationTests",
+			"Type": "Editor",
+			"LoadingPhase": "Default"
 		}
 	]
 }

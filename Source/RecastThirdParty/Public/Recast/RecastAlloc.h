@@ -95,7 +95,7 @@ typedef intptr_t rcSizeType;
 ///  * push_back() and resize() support adding values from the current vector. Range-based constructors and assign(begin, end) do not.
 ///  * No specialization for bool.
 template <typename T, rcAllocHint H>
-class RECASTTHIRDPARTY_API rcVectorBase
+class rcVectorBase
 {
 	rcSizeType m_size;
 	rcSizeType m_cap;
@@ -163,7 +163,7 @@ class RECASTTHIRDPARTY_API rcVectorBase
 };
 
 template<typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API bool rcVectorBase<T, H>::reserve(rcSizeType count)
+bool rcVectorBase<T, H>::reserve(rcSizeType count)
 {
 	if (count <= m_cap)
 	{
@@ -184,7 +184,7 @@ RECASTTHIRDPARTY_API bool rcVectorBase<T, H>::reserve(rcSizeType count)
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
+T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
 {
 	rcAssert(RC_SIZE_MAX / static_cast<rcSizeType>(sizeof(T)) >= size);
 	T* new_data = static_cast<T*>(rcAlloc(sizeof(T) * size, H));
@@ -196,7 +196,7 @@ RECASTTHIRDPARTY_API T* rcVectorBase<T, H>::allocate_and_copy(rcSizeType size)
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::assign(const T* begin, const T* end)
+void rcVectorBase<T, H>::assign(const T* begin, const T* end)
 {
 	clear();
 	reserve(end - begin);
@@ -205,7 +205,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::assign(const T* begin, const T* en
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::push_back(const T& value)
+void rcVectorBase<T, H>::push_back(const T& value)
 {
 	// rcLikely increases performance by ~50% on BM_rcVector_PushPreallocated,
 	// and by ~2-5% on BM_rcVector_Push.
@@ -228,7 +228,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::push_back(const T& value)
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType min_capacity)
+rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType min_capacity)
 {
 	rcAssert(min_capacity <= RC_SIZE_MAX);
 	if (rcUnlikely(m_cap >= RC_SIZE_MAX / 2))
@@ -239,7 +239,7 @@ RECASTTHIRDPARTY_API rcSizeType rcVectorBase<T, H>::get_new_capacity(rcSizeType 
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::resize_impl(rcSizeType size, const T* value)
+void rcVectorBase<T, H>::resize_impl(rcSizeType size, const T* value)
 {
 	if (size < m_size)
 	{
@@ -284,7 +284,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::resize_impl(rcSizeType size, const
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
+void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
 {
 	// TODO: Reorganize headers so we can use rcSwap here.
 	rcSizeType tmp_cap = other.m_cap;
@@ -302,7 +302,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::swap(rcVectorBase<T, H>& other)
 
 // static
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end)
+void rcVectorBase<T, H>::construct_range(T* begin, T* end)
 {
 	for (T* p = begin; p < end; p++)
 	{
@@ -312,7 +312,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end)
 
 // static
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end, const T& value)
+void rcVectorBase<T, H>::construct_range(T* begin, T* end, const T& value)
 {
 	for (T* p = begin; p < end; p++)
 	{
@@ -322,7 +322,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::construct_range(T* begin, T* end, 
 
 // static
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::copy_range(T* dst, const T* begin, const T* end)
+void rcVectorBase<T, H>::copy_range(T* dst, const T* begin, const T* end)
 {
 	for (rcSizeType i = 0 ; i < end - begin; i++)
 	{
@@ -331,7 +331,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::copy_range(T* dst, const T* begin,
 }
 
 template <typename T, rcAllocHint H>
-RECASTTHIRDPARTY_API void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rcSizeType end)
+void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rcSizeType end)
 {
 	for (rcSizeType i = begin; i < end; i++)
 	{
@@ -340,7 +340,7 @@ RECASTTHIRDPARTY_API void rcVectorBase<T, H>::destroy_range(rcSizeType begin, rc
 }
 
 template <typename T>
-class RECASTTHIRDPARTY_API rcTempVector : public rcVectorBase<T, RC_ALLOC_TEMP>
+class rcTempVector : public rcVectorBase<T, RC_ALLOC_TEMP>
 {
 	typedef rcVectorBase<T, RC_ALLOC_TEMP> Base;
 public:
@@ -352,7 +352,7 @@ public:
 };
 
 template <typename T>
-class RECASTTHIRDPARTY_API rcPermVector : public rcVectorBase<T, RC_ALLOC_PERM>
+class rcPermVector : public rcVectorBase<T, RC_ALLOC_PERM>
 {
 	typedef rcVectorBase<T, RC_ALLOC_PERM> Base;
 public:
@@ -365,7 +365,7 @@ public:
 
 /// A simple helper class used to delete an array when it goes out of scope.
 /// @note This class is rarely if ever used by the end user.
-template<class T> class RECASTTHIRDPARTY_API rcScopedDelete
+template<class T> class rcScopedDelete
 {
 	T* ptr;
 public:

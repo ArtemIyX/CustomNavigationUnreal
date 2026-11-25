@@ -309,7 +309,7 @@ struct RECASTTHIRDPARTY_API rcSpanPool
 
 /// A dynamic heightfield representing obstructed space.
 /// @ingroup recast
-struct RECASTTHIRDPARTY_API RECASTTHIRDPARTY_API rcHeightfield
+struct RECASTTHIRDPARTY_API rcHeightfield
 {
 	rcHeightfield();
 	~rcHeightfield();

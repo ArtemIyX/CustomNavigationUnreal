@@ -37,7 +37,7 @@ feature to find minor members.
 
 /// Used to ignore a function parameter.  VS complains about unused parameters
 /// and this silences the warning.
-template<class T> RECASTTHIRDPARTY_API void dtIgnoreUnused(const T&) { }
+template<class T> void dtIgnoreUnused(const T&) { }
 
 /// Swaps the values of the two parameters.
 ///  @param[in,out]	a	Value A
@@ -436,7 +436,7 @@ RECASTTHIRDPARTY_API bool dtOverlapPolyPoly2D(const float* polya, const int npol
 /// @name Miscellanious functions.
 /// @{
 
-inline RECASTTHIRDPARTY_API unsigned int dtNextPow2(unsigned int v)
+inline unsigned int dtNextPow2(unsigned int v)
 {
 	v--;
 	v |= v >> 1;
@@ -448,7 +448,7 @@ inline RECASTTHIRDPARTY_API unsigned int dtNextPow2(unsigned int v)
 	return v;
 }
 
-inline RECASTTHIRDPARTY_API unsigned int dtIlog2(unsigned int v)
+inline unsigned int dtIlog2(unsigned int v)
 {
 	unsigned int r;
 	unsigned int shift;
@@ -460,42 +460,42 @@ inline RECASTTHIRDPARTY_API unsigned int dtIlog2(unsigned int v)
 	return r;
 }
 
-inline RECASTTHIRDPARTY_API int dtAlign4(int x) { return (x+3) & ~3; }
+inline int dtAlign4(int x) { return (x+3) & ~3; }
 
-inline RECASTTHIRDPARTY_API int dtOppositeTile(int side) { return (side+4) & 0x7; }
+inline int dtOppositeTile(int side) { return (side+4) & 0x7; }
 
-inline RECASTTHIRDPARTY_API void dtSwapByte(unsigned char* a, unsigned char* b)
+inline void dtSwapByte(unsigned char* a, unsigned char* b)
 {
 	unsigned char tmp = *a;
 	*a = *b;
 	*b = tmp;
 }
 
-inline RECASTTHIRDPARTY_API void dtSwapEndian(unsigned short* v)
+inline void dtSwapEndian(unsigned short* v)
 {
 	unsigned char* x = (unsigned char*)v;
 	dtSwapByte(x+0, x+1);
 }
 
-inline RECASTTHIRDPARTY_API void dtSwapEndian(short* v)
+inline void dtSwapEndian(short* v)
 {
 	unsigned char* x = (unsigned char*)v;
 	dtSwapByte(x+0, x+1);
 }
 
-inline RECASTTHIRDPARTY_API void dtSwapEndian(unsigned int* v)
+inline void dtSwapEndian(unsigned int* v)
 {
 	unsigned char* x = (unsigned char*)v;
 	dtSwapByte(x+0, x+3); dtSwapByte(x+1, x+2);
 }
 
-inline RECASTTHIRDPARTY_API void dtSwapEndian(int* v)
+inline void dtSwapEndian(int* v)
 {
 	unsigned char* x = (unsigned char*)v;
 	dtSwapByte(x+0, x+3); dtSwapByte(x+1, x+2);
 }
 
-inline RECASTTHIRDPARTY_API void dtSwapEndian(float* v)
+inline void dtSwapEndian(float* v)
 {
 	unsigned char* x = (unsigned char*)v;
 	dtSwapByte(x+0, x+3); dtSwapByte(x+1, x+2);
@@ -505,7 +505,7 @@ RECASTTHIRDPARTY_API void dtRandomPointInConvexPoly(const float* pts, const int 
 							   const float s, const float t, float* out);
 
 template<typename TypeToRetrieveAs>
-RECASTTHIRDPARTY_API TypeToRetrieveAs* dtGetThenAdvanceBufferPointer(const unsigned char*& buffer, const size_t distanceToAdvance)
+TypeToRetrieveAs* dtGetThenAdvanceBufferPointer(const unsigned char*& buffer, const size_t distanceToAdvance)
 {
 	TypeToRetrieveAs* returnPointer = reinterpret_cast<TypeToRetrieveAs*>(buffer);
 	buffer += distanceToAdvance;
@@ -513,7 +513,7 @@ RECASTTHIRDPARTY_API TypeToRetrieveAs* dtGetThenAdvanceBufferPointer(const unsig
 }
 
 template<typename TypeToRetrieveAs>
-RECASTTHIRDPARTY_API TypeToRetrieveAs* dtGetThenAdvanceBufferPointer(unsigned char*& buffer, const size_t distanceToAdvance)
+TypeToRetrieveAs* dtGetThenAdvanceBufferPointer(unsigned char*& buffer, const size_t distanceToAdvance)
 {
 	TypeToRetrieveAs* returnPointer = reinterpret_cast<TypeToRetrieveAs*>(buffer);
 	buffer += distanceToAdvance;
