@@ -296,15 +296,6 @@ bool FNavigationAPITest::RunTest(const FString& Parameters)
 		dtClosestPtPointTriangle(closest, a, a, b, c);
 		UE_LOG(LogRecastAPITest, Log, TEXT("dtClosestPtPointTriangle OK"));
 	}
-
-	if (bAllOk)
-	{
-		UE_LOG(LogRecastAPITest, Log, TEXT("=== ALL RecastThirdParty API tests PASSED ==="));
-	}
-	else
-	{
-		UE_LOG(LogRecastAPITest, Error, TEXT("=== SOME RecastThirdParty API tests FAILED ==="));
-	}
-
+	
 	return bAllOk;
 }
