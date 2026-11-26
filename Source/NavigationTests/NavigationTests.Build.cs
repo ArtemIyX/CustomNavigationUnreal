@@ -20,7 +20,8 @@ public class NavigationTests : ModuleRules
                 "Engine",
                 "Slate",
                 "SlateCore", 
-                "RecastThirdParty"
+                "RecastThirdParty",
+                "CustomNavigationUnreal"
             }
         );
     }

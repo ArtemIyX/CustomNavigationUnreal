@@ -6,6 +6,8 @@
 - Included components: Recast and Detour. DetourCrowd, DetourTileCache, DebugUtils and RecastDemo are not included.
 - License: see `License.txt` in this directory and the notices in the source files.
 
+For calling Recast and Detour from plugin code (pipeline, signatures, units, Detour setup) see [RECAST_API.md](RECAST_API.md). For the plugin API see the [plugin README](../../README.md).
+
 ## Source provenance and local changes
 
 The intended reference is v1.6.0, but the current files are **not an exact copy of that release**. A comparison against the release found differences beyond Unreal integration, including changes in Recast area processing and Detour navigation code. The exact origin of those differences has not been established; do not treat the release commit as a verified pin for the current source.

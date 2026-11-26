@@ -1,4 +1,4 @@
-﻿// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
 
@@ -11,14 +11,15 @@ public class CustomNavigationUnreal : ModuleRules
 		PublicDependencyModuleNames.AddRange(new string[]
 		{
 				"Core",
-				
+				"CoreUObject",
+				"Engine",
 		});
 			
 		
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-				"CoreUObject",
-				"Engine",
+				"RenderCore",
+				"RHI",
 				"Slate",
 				"SlateCore",
 				"RecastThirdParty"
