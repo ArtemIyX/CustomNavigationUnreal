@@ -73,6 +73,7 @@ Other calls:
 - `GetPublishedRegion(Key, bAllowStale)`: by default returns nothing while the mesh is older than the desired revision. Pass `true` to keep drawing the last good mesh.
 - `HasRegion`, `GetRegionKeys`, `IsBuildRunning`, `IsClosing`.
 - `FlushPendingBuilds()` starts the next pending build now instead of on the next ticker tick.
+- `ProcessCompletedBuilds(BudgetSeconds = -1)` applies finished builds now instead of on the next ticker tick. Normally not needed.
 
 Rules for requests:
 - A request identical to the last one (same bounds and `Settings.Equals`) that is pending, building or ready returns the existing revision and starts nothing.
@@ -157,10 +158,13 @@ Contract:
 |---|---|---|
 | Request, invalidate, register, query | Game | Subsystem state |
 | Provider collection, snapshot build and validation | Game (inside the scheduler tick or `FlushPendingBuilds`) | Providers, world, then plain arrays |
-| Recast build | Worker (`UE::Tasks`) | **Only** the snapshot and a cancellation flag. No UObjects, no subsystem, no providers. |
-| Completion: discard or publish, then broadcast `OnRegionBuildFinished` | Game | Subsystem, resolved through a `TWeakObjectPtr` |
+| Recast build | Dedicated `CustomNavBuild` thread (`FRunnable`) | **Only** the snapshot, a cancellation flag and the world's completion queue. No UObjects, no subsystem, no providers. |
+| Result handed over | Build thread | Pushes the result into the world's completion queue (lock-free `TQueue`). Nothing is posted to the game thread. |
+| Completion: discard or publish, then broadcast `OnRegionBuildFinished` | Game (scheduler tick) | Subsystem state |
 
-- **One build runs at a time per world.** Other dirty regions wait in a FIFO queue. The scheduler is an `FTSTicker` that is armed only while work is pending.
+- **One build thread for all worlds.** `FCustomNavBuildThread` is created on the first build, runs jobs one after another in FIFO order (editor and PIE worlds share it), runs at below-normal priority and sleeps on an event while idle. Without multithreading support (`-nothreading`, some commandlets) jobs run inline.
+- **One build runs at a time per world.** Other dirty regions wait in a FIFO queue. The scheduler is an `FTSTicker` that is armed only while there is pending work, a running job or an undrained result.
+- **Results are polled, not called back.** Each tick, the subsystem first drains its completion queue, then starts the next pending region. Draining stops after `CustomNav.CompletionBudgetMs` (default 1 ms, `<= 0` = no limit) per world per tick, but at least one result is always applied, so the game thread never does more than that per frame and the queue always makes progress.
 - **The worker owns its input.** The job holds a `TSharedPtr<const FCustomNavBuildSnapshot>` and releases it as soon as Recast finishes. Providers, actors and the world may change or die meanwhile.
 - **Stale results are discarded.** A completion is dropped, and `DiscardedCompletions` is incremented, in any of these cases:
   - the world is closing, or the result belongs to another world lifetime;
@@ -171,7 +175,7 @@ Contract:
 
   Only a result for the current revision is published.
 - **Cancellation is cooperative.** It is checked between Recast stages, never in the middle of one.
-- **Teardown**: `Deinitialize` cancels jobs, stops the ticker and clears everything. A completion that arrives later is a no-op, even if the subsystem was already garbage collected. Module shutdown waits up to 30 s for running workers, because they execute this module's code.
+- **Teardown**: `Deinitialize` cancels jobs, stops the ticker, drops its reference to the completion queue and clears everything. A job that finishes later pushes into a queue only it still references, and the result is freed with the job, even if the subsystem was already garbage collected. Module shutdown stops the build thread and waits for the running job, because it executes this module's code; queued jobs are dropped unrun.
 - The global Recast allocator and logging are not changed. Recast messages go to the build's diagnostics through a per-build `rcContext`.
 
 ## Coordinates (snapshot and Recast space)
@@ -259,12 +263,12 @@ Close the editor, build the editor target, then run:
 | `CustomNavigation.Build.Recast` | Plane area (erosion), CCW polygons, +Z detail mesh, far-from-origin build, downward, wall-only and null-area input, obstacle, default scene, cancellation, malformed snapshot |
 | `CustomNavigation.Coordinator.Publish` | Pending, building and ready; request sharing; invalidation by bounds; stale access; mesh outliving the world |
 | `CustomNavigation.Coordinator.StaleResult` | Result N discarded after a change, N+1 published, removed region not resurrected |
-| `CustomNavigation.Coordinator.Teardown` | World destroyed during a build; completion after the subsystem is garbage collected |
+| `CustomNavigation.Coordinator.Teardown` | World destroyed during a build; the job runs after the subsystem is garbage collected |
 | `CustomNavigation.Coordinator.Failures` | Invalid settings or geometry (no worker), provider failure and retry, duplicates and conflict, empty input |
-| `CustomNavigation.Coordinator.AsyncSmoke` | Real `UE::Tasks` path; the worker runs off the game thread |
+| `CustomNavigation.Coordinator.AsyncSmoke` | Real path: the job runs on the `CustomNavBuild` thread and the ticker applies the result |
 | `CustomNavigation.API.*`, `CustomNavigation.Workflow.*` | Raw Recast and Detour smoke tests |
 
-Coordinator tests swap in a manual executor (`SetBuildExecutorForTesting`, `SetAutoScheduleForTesting(false)`), so the test decides exactly when workers and completions run.
+Coordinator tests swap in a manual executor (`SetBuildExecutorForTesting`, `SetAutoScheduleForTesting(false)`), so the test decides exactly when jobs run (`FManualQueue::RunWorkers`) and when results are applied (`ProcessCompletedBuilds`).
 
 ## Limitations and known issues
 

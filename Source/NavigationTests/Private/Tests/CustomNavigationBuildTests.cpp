@@ -3,6 +3,7 @@
 #include "Misc/AutomationTest.h"
 #include "Tests/AutomationCommon.h"
 #include "Engine/World.h"
+#include "HAL/ThreadManager.h"
 #include "Navigation/CustomNavigationTypes.h"
 #include "Navigation/CustomNavigationGeometryProvider.h"
 #include "Navigation/CustomNavigationHardcodedProvider.h"
@@ -74,11 +75,10 @@ namespace CustomNavigationTests
 		return CustomNavigation::BuildSnapshot(MakeToken(), Bounds, Settings, Chunks, Out, OutDiagnostics);
 	}
 
-	/** Executor that only queues work; the test decides when workers and completions run. */
+	/** Executor that only queues work; the test decides when it runs. Results land in the subsystem's completion queue. */
 	struct FManualQueue
 	{
 		TArray<TUniqueFunction<void()>> Workers;
-		TArray<TUniqueFunction<void()>> Completions;
 
 		int32 RunWorkers()
 		{
@@ -92,32 +92,12 @@ namespace CustomNavigationTests
 			}
 			return Count;
 		}
-
-		int32 RunCompletions()
-		{
-			int32 Count = 0;
-			while (Completions.Num() > 0)
-			{
-				TUniqueFunction<void()> Completion = MoveTemp(Completions[0]);
-				Completions.RemoveAt(0);
-				Completion();
-				++Count;
-			}
-			return Count;
-		}
-
-		void RunAll()
-		{
-			RunWorkers();
-			RunCompletions();
-		}
 	};
 
 	TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> MakeManualExecutor(const TSharedRef<FManualQueue>& Queue)
 	{
 		TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Executor = MakeShared<FCustomNavBuildExecutor, ESPMode::ThreadSafe>();
 		Executor->LaunchWorker = [Queue](TUniqueFunction<void()>&& Work) { Queue->Workers.Add(MoveTemp(Work)); };
-		Executor->PostToGameThread = [Queue](TUniqueFunction<void()>&& Completion) { Queue->Completions.Add(MoveTemp(Completion)); };
 		return Executor;
 	}
 
@@ -155,6 +135,13 @@ namespace CustomNavigationTests
 			Request.Key = FCustomNavRegionKey(Id, TEXT("Default"));
 			Request.WorldBounds = TestBounds();
 			return Request;
+		}
+
+		/** Runs queued jobs, then applies their results on the game thread. */
+		void RunAll()
+		{
+			Queue->RunWorkers();
+			Subsystem->ProcessCompletedBuilds();
 		}
 	};
 }
@@ -561,7 +548,9 @@ bool FCustomNavCoordinatorPublishTest::RunTest(const FString& Parameters)
 
 	Env.Queue->RunWorkers();
 	TestFalse(TEXT("Worker alone does not publish"), Sub.GetPublishedRegion(Request.Key).IsValid());
-	Env.Queue->RunCompletions();
+	TestTrue(TEXT("Still building until the game thread drains the result"), Sub.IsBuildRunning());
+	TestEqual(TEXT("Zero budget still applies one result"), Sub.ProcessCompletedBuilds(0.0), 1);
+	TestEqual(TEXT("Queue empty afterwards"), Sub.ProcessCompletedBuilds(), 0);
 
 	const FCustomNavRegionStatus Status = Sub.GetRegionStatus(Request.Key);
 	TestEqual(FString::Printf(TEXT("Outcome\n%s"), *Status.LastDiagnostics.ToString()), Status.LastOutcome, ECustomNavBuildStatus::Success);
@@ -621,7 +610,7 @@ bool FCustomNavCoordinatorStaleTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("N+1 not launched while N runs"), Sub.GetLaunchedJobCount(), 1);
 
 	// Complete N: must be discarded.
-	Env.Queue->RunAll();
+	Env.RunAll();
 	FCustomNavRegionStatus Status = Sub.GetRegionStatus(Request.Key);
 	TestEqual(TEXT("N discarded"), Status.DiscardedCompletions, 1);
 	TestEqual(TEXT("Nothing published from N"), Status.PublishedRevision, uint64(0));
@@ -630,7 +619,7 @@ bool FCustomNavCoordinatorStaleTest::RunTest(const FString& Parameters)
 	// N+1 runs and publishes.
 	Sub.FlushPendingBuilds();
 	TestEqual(TEXT("N+1 launched"), Sub.GetLaunchedJobCount(), 2);
-	Env.Queue->RunAll();
+	Env.RunAll();
 	Status = Sub.GetRegionStatus(Request.Key);
 	TestEqual(TEXT("N+1 published"), Status.PublishedRevision, RevisionN1);
 	TestEqual(TEXT("Ready"), Status.State, ECustomNavRegionState::Ready);
@@ -639,7 +628,7 @@ bool FCustomNavCoordinatorStaleTest::RunTest(const FString& Parameters)
 	Sub.InvalidateAll();
 	Sub.FlushPendingBuilds();
 	Sub.RemoveRegion(Request.Key);
-	Env.Queue->RunAll();
+	Env.RunAll();
 	TestFalse(TEXT("Removed region not resurrected"), Sub.HasRegion(Request.Key));
 	TestFalse(TEXT("Slot freed after discarded completion"), Sub.IsBuildRunning());
 	return true;
@@ -671,16 +660,16 @@ bool FCustomNavCoordinatorTeardownTest::RunTest(const FString& Parameters)
 	Env.Provider.Reset();
 	TestTrue(TEXT("Subsystem closing"), !WeakSub.IsValid() || WeakSub->IsClosing());
 
-	// The worker still has valid input (it owns its snapshot) and finishes; the completion is dropped.
+	// The worker still has valid input (it owns its snapshot) and finishes; its result is never applied.
 	TestEqual(TEXT("Worker ran"), Queue->RunWorkers(), 1);
-	TestEqual(TEXT("Completion delivered"), Queue->RunCompletions(), 1);
-	TestEqual(TEXT("No broadcast after teardown"), FinishedCount, 0);
 	if (WeakSub.IsValid())
 	{
+		TestEqual(TEXT("Closing subsystem drains nothing"), WeakSub->ProcessCompletedBuilds(), 0);
 		TestFalse(TEXT("Nothing published after teardown"), WeakSub->HasRegion(FCustomNavRegionKey(TEXT("Region"), TEXT("Default"))));
 	}
+	TestEqual(TEXT("No broadcast after teardown"), FinishedCount, 0);
 
-	// Same again, but GC the subsystem before the completion runs.
+	// Same again, but the subsystem is garbage collected before the job even runs.
 	FCoordinatorEnv Env2;
 	if (!Env2.Init(*this))
 	{
@@ -689,10 +678,11 @@ bool FCustomNavCoordinatorTeardownTest::RunTest(const FString& Parameters)
 	TWeakObjectPtr<UCustomNavigationWorldSubsystem> WeakSub2(Env2.Subsystem);
 	Env2.Subsystem->RequestRegionBuild(Env2.MakeRequest());
 	Env2.Subsystem->FlushPendingBuilds();
-	Env2.Queue->RunWorkers();
+	Env2.Subsystem = nullptr;
 	Env2.World.DestroyTestWorld(/*bForceGarbageCollect*/ true);
 	TestFalse(TEXT("Subsystem collected"), WeakSub2.IsValid());
-	TestEqual(TEXT("Completion after GC is a no-op"), Env2.Queue->RunCompletions(), 1);
+	// The job pushes into a completion queue only it still references; the result is freed with the job.
+	TestEqual(TEXT("Job after GC runs without touching the subsystem"), Env2.Queue->RunWorkers(), 1);
 	return true;
 }
 
@@ -753,7 +743,7 @@ bool FCustomNavCoordinatorFailuresTest::RunTest(const FString& Parameters)
 		// Identical request after a failure retries.
 		Sub.RequestRegionBuild(Request);
 		Sub.FlushPendingBuilds();
-		Env.Queue->RunAll();
+		Env.RunAll();
 		TestEqual(TEXT("Retry succeeds"), Sub.GetRegionStatus(Request.Key).LastOutcome, ECustomNavBuildStatus::Success);
 		Sub.RemoveRegion(Request.Key);
 	}
@@ -767,7 +757,7 @@ bool FCustomNavCoordinatorFailuresTest::RunTest(const FString& Parameters)
 		const FCustomNavRegionRequest Request = Env.MakeRequest(TEXT("Twins"));
 		Sub.RequestRegionBuild(Request);
 		Sub.FlushPendingBuilds();
-		Env.Queue->RunAll();
+		Env.RunAll();
 		FCustomNavRegionStatus Status = Sub.GetRegionStatus(Request.Key);
 		TestEqual(TEXT("Identical duplicates build"), Status.LastOutcome, ECustomNavBuildStatus::Success);
 		TestTrue(TEXT("Duplicate reported"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::DuplicateSourceSkipped));
@@ -799,7 +789,7 @@ bool FCustomNavCoordinatorFailuresTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Real async path (UE::Tasks worker + game thread completion)
+// Real async path (dedicated build thread + completion queue drained by the ticker)
 // ---------------------------------------------------------------------------------------------------------------------
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavAsyncSmokeTest, "CustomNavigation.Coordinator.AsyncSmoke", CustomNavigationTests::Flags)
@@ -815,6 +805,7 @@ bool FCustomNavAsyncSmokeTest::RunTest(const FString& Parameters)
 		uint64 Revision = 0;
 		double StartTime = 0.0;
 		bool bWorkerOffGameThread = false;
+		FString WorkerThreadName;
 	};
 	TSharedRef<FState> State = MakeShared<FState>();
 
@@ -832,14 +823,13 @@ bool FCustomNavAsyncSmokeTest::RunTest(const FString& Parameters)
 	// Default executor, wrapped only to observe the worker thread.
 	TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Default = FCustomNavBuildExecutor::MakeDefault();
 	TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Observed = MakeShared<FCustomNavBuildExecutor, ESPMode::ThreadSafe>();
-	Observed->PostToGameThread = Default->PostToGameThread;
-	TWeakPtr<FState> WeakState = State;
 	Observed->LaunchWorker = [Default, StatePtr = &State.Get()](TUniqueFunction<void()>&& Work)
 	{
 		Default->LaunchWorker([StatePtr, Work = MoveTemp(Work)]() mutable
 		{
-			// Written on the worker, read on the game thread after the completion (task-graph ordering).
+			// Written before the result is queued, read after the game thread dequeued it (the queue orders memory).
 			StatePtr->bWorkerOffGameThread = !IsInGameThread();
+			StatePtr->WorkerThreadName = FThreadManager::GetThreadName(FPlatformTLS::GetCurrentThreadId());
 			Work();
 		});
 	};
@@ -868,6 +858,7 @@ bool FCustomNavAsyncSmokeTest::RunTest(const FString& Parameters)
 		TestEqual(FString::Printf(TEXT("Async outcome\n%s"), *Status.LastDiagnostics.ToString()), Status.LastOutcome, ECustomNavBuildStatus::Success);
 		TestEqual(TEXT("Async revision"), Status.PublishedRevision, State->Revision);
 		TestTrue(TEXT("Worker ran off the game thread"), State->bWorkerOffGameThread);
+		TestEqual(TEXT("Worker ran on the dedicated build thread"), State->WorkerThreadName, FString(TEXT("CustomNavBuild")));
 		const FCustomNavRegionMeshPtr Mesh = State->Subsystem->GetPublishedRegion(State->Key);
 		TestTrue(TEXT("Async mesh"), Mesh.IsValid() && Mesh->NumPolygons() > 0);
 		State->World.DestroyTestWorld(false);

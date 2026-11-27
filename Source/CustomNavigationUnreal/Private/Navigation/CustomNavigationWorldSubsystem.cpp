@@ -3,21 +3,26 @@
 #include "Navigation/CustomNavigationWorldSubsystem.h"
 #include "Navigation/Internal/CustomNavigationSnapshot.h"
 #include "Navigation/Internal/CustomNavigationRecastBuilder.h"
+#include "Navigation/CustomNavigationBuildThread.h"
 #include "Engine/World.h"
-#include "Async/Async.h"
-#include "Tasks/Task.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformTime.h"
 #include <atomic>
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(CustomNavigationWorldSubsystem)
 
 namespace CustomNavigationPrivate
 {
-	/** Worker jobs launched by the default executor that have not finished their Recast work yet. Drained on module shutdown. */
-	std::atomic<int32> GInFlightWorkerJobs{0};
-
 	static std::atomic<uint64> GNextWorldLifetimeId{1};
 
 	static const FName StageCollectName(TEXT("Collect"));
+
+	static float GCompletionBudgetMs = 1.0f;
+	static FAutoConsoleVariableRef CVarCompletionBudgetMs(
+		TEXT("CustomNav.CompletionBudgetMs"),
+		GCompletionBudgetMs,
+		TEXT("Game-thread time per tick for applying finished navmesh builds, per world. At least one result is always applied. <= 0: no limit."),
+		ECVF_Default);
 }
 
 TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> FCustomNavBuildExecutor::MakeDefault()
@@ -25,17 +30,7 @@ TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> FCustomNavBuildExecutor
 	TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Result = MakeShared<FCustomNavBuildExecutor, ESPMode::ThreadSafe>();
 	Result->LaunchWorker = [](TUniqueFunction<void()>&& Work)
 	{
-		CustomNavigationPrivate::GInFlightWorkerJobs.fetch_add(1);
-		UE::Tasks::Launch(UE_SOURCE_LOCATION, [Work = MoveTemp(Work)]() mutable
-		{
-			Work();
-			Work.Reset();
-			CustomNavigationPrivate::GInFlightWorkerJobs.fetch_sub(1);
-		});
-	};
-	Result->PostToGameThread = [](TUniqueFunction<void()>&& Completion)
-	{
-		AsyncTask(ENamedThreads::GameThread, MoveTemp(Completion));
+		FCustomNavBuildThread::Enqueue(MoveTemp(Work));
 	};
 	return Result;
 }
@@ -50,6 +45,7 @@ void UCustomNavigationWorldSubsystem::Initialize(FSubsystemCollectionBase& Colle
 	Super::Initialize(Collection);
 	WorldLifetimeId = CustomNavigationPrivate::GNextWorldLifetimeId.fetch_add(1);
 	Executor = FCustomNavBuildExecutor::MakeDefault();
+	Completions = MakeShared<FCustomNavBuildCompletionQueue, ESPMode::ThreadSafe>();
 	bClosing = false;
 }
 
@@ -57,7 +53,8 @@ void UCustomNavigationWorldSubsystem::Deinitialize()
 {
 	bClosing = true;
 
-	// Running jobs keep their own copy of the snapshot; cancel them and let their completions be discarded.
+	// Running jobs keep their own copy of the snapshot and their own reference to the completion queue; cancel them.
+	// Dropping our reference means their results are never read and die with the job.
 	for (TPair<FCustomNavRegionKey, FRegionRecord>& Pair : Regions)
 	{
 		if (Pair.Value.RunningCancellation.IsValid())
@@ -70,6 +67,7 @@ void UCustomNavigationWorldSubsystem::Deinitialize()
 		FTSTicker::RemoveTicker(TickerHandle);
 		TickerHandle.Reset();
 	}
+	Completions.Reset();
 	Regions.Empty();
 	PendingQueue.Empty();
 	Providers.Empty();
@@ -186,14 +184,48 @@ bool UCustomNavigationWorldSubsystem::TickScheduler(float DeltaTime)
 		TickerHandle.Reset();
 		return false;
 	}
+	// Apply results first: that frees the build slot, so the next pending region starts in the same tick.
+	const float BudgetMs = CustomNavigationPrivate::GCompletionBudgetMs;
+	ProcessCompletedBuilds(BudgetMs > 0.f ? BudgetMs / 1000.0 : -1.0);
+	if (bClosing)
+	{
+		TickerHandle.Reset();
+		return false;
+	}
 	FlushPendingBuilds();
-	// Keep ticking only while there is queued work; completion and new requests re-arm the ticker.
-	if (PendingQueue.Num() == 0)
+
+	// Keep ticking while there is anything to start, to wait for, or to apply; new requests re-arm the ticker.
+	if (PendingQueue.Num() == 0 && ActiveRequestId == 0 && !HasUndrainedResults())
 	{
 		TickerHandle.Reset();
 		return false;
 	}
 	return true;
+}
+
+bool UCustomNavigationWorldSubsystem::HasUndrainedResults() const
+{
+	return Completions.IsValid() && !Completions->Results.IsEmpty();
+}
+
+int32 UCustomNavigationWorldSubsystem::ProcessCompletedBuilds(double BudgetSeconds)
+{
+	check(IsInGameThread());
+	const double StartTime = FPlatformTime::Seconds();
+	int32 Count = 0;
+	FCustomNavBuildResult Result;
+	// Re-check the queue each time: a listener may tear the subsystem down (Deinitialize drops the queue).
+	while (!bClosing && Completions.IsValid() && Completions->Results.Dequeue(Result))
+	{
+		OnBuildCompleted(MoveTemp(Result));
+		Result = FCustomNavBuildResult();
+		++Count;
+		if (BudgetSeconds >= 0.0 && FPlatformTime::Seconds() - StartTime >= BudgetSeconds)
+		{
+			break; // the rest waits for the next tick
+		}
+	}
+	return Count;
 }
 
 // --- Builds ---
@@ -385,27 +417,19 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 
 	UE_LOG(LogCustomNavigation, Verbose, TEXT("Dispatch %s: %d tris, %d verts"), *Token.ToString(), Snapshot->NumTriangles(), Snapshot->NumVertices());
 
-	TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> ExecutorRef = Executor.ToSharedRef();
-	TWeakObjectPtr<UCustomNavigationWorldSubsystem> WeakThis(this);
 	TSharedPtr<const FCustomNavBuildSnapshot, ESPMode::ThreadSafe> ConstSnapshot = MoveTemp(Snapshot);
+	TSharedRef<FCustomNavBuildCompletionQueue, ESPMode::ThreadSafe> CompletionQueue = Completions.ToSharedRef();
 
-	// The worker closure owns only plain data: the snapshot, the cancellation flag, a weak pointer it never
-	// dereferences, and the executor. It does not touch the world, the providers or any UObject.
-	ExecutorRef->LaunchWorker([ConstSnapshot, Cancellation, WeakThis, ExecutorRef]() mutable
+	// The job owns only plain data: the snapshot, the cancellation flag and the completion queue.
+	// It does not touch the world, the providers or any UObject, and does not call back into the game thread:
+	// the subsystem picks the result up from the queue in its ticker.
+	Executor->LaunchWorker([ConstSnapshot, Cancellation, CompletionQueue]() mutable
 	{
 		FCustomNavBuildResult BuildResult = FCustomNavRecastBuilder::Build(*ConstSnapshot, &Cancellation.Get());
 		ConstSnapshot.Reset(); // release the input as soon as the build is done
-
-		ExecutorRef->PostToGameThread([WeakThis, BuildResult = MoveTemp(BuildResult)]() mutable
-		{
-			check(IsInGameThread());
-			if (UCustomNavigationWorldSubsystem* Subsystem = WeakThis.Get())
-			{
-				Subsystem->OnBuildCompleted(MoveTemp(BuildResult));
-			}
-			// Otherwise the world is gone: the result is dropped here.
-		});
+		CompletionQueue->Results.Enqueue(MoveTemp(BuildResult));
 	});
+	EnsureTicker();
 	return true;
 }
 

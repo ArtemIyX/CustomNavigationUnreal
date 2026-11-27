@@ -9,6 +9,7 @@
 
 #include "CoreMinimal.h"
 #include "Navigation/Internal/CustomNavigationSnapshot.h"
+#include "Containers/Queue.h"
 #include <atomic>
 
 /** Thread-safe cooperative cancellation flag shared by the coordinator and one job. */
@@ -31,6 +32,16 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavBuildResult
 	/** Set only when Status == Success. */
 	TSharedPtr<FCustomNavRegionMesh, ESPMode::ThreadSafe> Mesh;
 	double TotalBuildMs = 0.0;
+};
+
+/**
+ * Finished builds of one world, waiting for the game thread. The build thread pushes, the subsystem pops in its tick.
+ * Jobs hold a shared reference, so a job that outlives its world still has somewhere to put its result; nobody reads it
+ * and it is freed with the last reference.
+ */
+struct FCustomNavBuildCompletionQueue
+{
+	TQueue<FCustomNavBuildResult, EQueueMode::Mpsc> Results;
 };
 
 /**

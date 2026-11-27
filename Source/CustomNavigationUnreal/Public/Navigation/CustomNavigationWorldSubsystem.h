@@ -12,16 +12,16 @@
 struct FCustomNavBuildResult;
 struct FCustomNavBuildToken;
 struct FCustomNavCancellation;
+struct FCustomNavBuildCompletionQueue;
 
 /**
- * How build work leaves and re-enters the game thread. The default runs the build as a UE::Tasks task
- * on the worker pool and posts completion with AsyncTask(ENamedThreads::GameThread).
- * Tests replace it to hold a job and release it later deterministically.
+ * Where build work runs. The default queues it on the dedicated "CustomNavBuild" FRunnable thread.
+ * The work itself pushes its result into the world's completion queue; nothing is posted back to the game thread.
+ * Tests replace it to hold a job and run it later deterministically.
  */
 struct CUSTOMNAVIGATIONUNREAL_API FCustomNavBuildExecutor
 {
 	TFunction<void(TUniqueFunction<void()>&& Work)> LaunchWorker;
-	TFunction<void(TUniqueFunction<void()>&& Completion)> PostToGameThread;
 
 	static TSharedRef<FCustomNavBuildExecutor, ESPMode::ThreadSafe> MakeDefault();
 };
@@ -34,12 +34,15 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCustomNavRegionBuildFinished, const FCus
  * Threading:
  *  - Every public function must be called on the game thread (checked).
  *  - Providers are invoked on the game thread during collection; the result is frozen into an immutable snapshot.
- *  - Only the snapshot goes to the worker. The worker never touches the world, providers or any UObject.
- *  - Completion returns to the game thread; it is published only if the subsystem is alive, not closing, and the
- *    job's token (world lifetime, key, desired revision, request id) still matches. Otherwise it is discarded.
+ *  - Only the snapshot goes to the build thread. It never touches the world, providers or any UObject.
+ *  - The build thread pushes the result into this world's completion queue. The subsystem drains it on the game
+ *    thread in its ticker, within a time budget (CustomNav.CompletionBudgetMs). A result is published only if the
+ *    subsystem is not closing and the job's token (world lifetime, key, desired revision, request id) still matches.
+ *    Otherwise it is discarded.
  *
  * Scheduling: one active job per world. Requests and invalidations only mark a region dirty; the build starts on
- * the next ticker update (or FlushPendingBuilds), so many changes in one frame produce one build.
+ * the next ticker update (or FlushPendingBuilds), so many changes in one frame produce one build. The ticker runs
+ * only while there is pending work, a running job or an undrained result.
  */
 UCLASS()
 class CUSTOMNAVIGATIONUNREAL_API UCustomNavigationWorldSubsystem : public UWorldSubsystem
@@ -97,6 +100,13 @@ public:
 	/** Starts pending builds now instead of waiting for the ticker. Normally not needed. */
 	void FlushPendingBuilds();
 
+	/**
+	 * Applies finished builds from the completion queue now instead of waiting for the ticker.
+	 * Stops once BudgetSeconds has been spent (negative = no limit), but always applies at least one result.
+	 * @return how many results were taken from the queue (published or discarded).
+	 */
+	int32 ProcessCompletedBuilds(double BudgetSeconds = -1.0);
+
 	bool IsBuildRunning() const { return ActiveRequestId != 0; }
 	bool IsClosing() const { return bClosing; }
 
@@ -110,9 +120,6 @@ public:
 	void SetAutoScheduleForTesting(bool bEnabled) { bAutoSchedule = bEnabled; }
 	uint64 GetWorldLifetimeId() const { return WorldLifetimeId; }
 	int32 GetLaunchedJobCount() const { return LaunchedJobCount; }
-
-	/** Completion entry point; public only so the static completion closure can call it. */
-	void OnBuildCompleted(FCustomNavBuildResult&& Result);
 
 private:
 	struct FProviderEntry
@@ -144,6 +151,8 @@ private:
 
 	bool TickScheduler(float DeltaTime);
 	void EnsureTicker();
+	bool HasUndrainedResults() const;
+	void OnBuildCompleted(FCustomNavBuildResult&& Result);
 	void MarkDirty(FRegionRecord& Record);
 	void EnqueuePending(const FCustomNavRegionKey& Key);
 	/**
@@ -160,6 +169,8 @@ private:
 	TArray<FCustomNavRegionKey> PendingQueue;
 
 	TSharedPtr<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Executor;
+	/** Shared with running jobs; dropped in Deinitialize so late results go nowhere. */
+	TSharedPtr<FCustomNavBuildCompletionQueue, ESPMode::ThreadSafe> Completions;
 	FTSTicker::FDelegateHandle TickerHandle;
 
 	uint64 WorldLifetimeId = 0;
