@@ -2,7 +2,7 @@
 ## C++ Code Rules
 
 1. Put each struct and enum in its own file.
-2. Put shared data types in dedicated module (e.g. VoxelLandData).
+2. Put shared data types in dedicated module
 3. Do not use anonymous namespaces. Use static class functions.
 4. Keep .cpp files small. Split large ones into several .cpp files.
 5. Forward declare instead of including headers where possible.
