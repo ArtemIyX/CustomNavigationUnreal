@@ -44,6 +44,11 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCustomNavRegionBuildFinished, const FCus
  * region dirty. A dirty region starts once it has been quiet for DebounceSeconds, or MaxLatencySeconds after its
  * first unbuilt change, whichever comes first; among due regions the oldest queued goes first. At most
  * MaxPendingRegions wait in the pending queue, the rest are Deferred in FIFO order and promoted when room frees.
+ * Each region is collected at most once per scheduler pass; one invalidated during its own collection waits for the next.
+ * Scheduling calls made from inside a provider's CollectGeometry are ignored (the outer pass continues).
+ *
+ * World origin rebasing: on FCoreDelegates::PostWorldOriginOffset for this world, region bounds are shifted, published
+ * meshes (old frame) are dropped, running builds are cancelled and every region rebuilds.
  * The ticker runs only while there is pending work, a running job or an undrained result.
  */
 UCLASS()
@@ -116,6 +121,12 @@ public:
 	void SetSchedulingPolicy(const FCustomNavSchedulingPolicy& InPolicy);
 	const FCustomNavSchedulingPolicy& GetSchedulingPolicy() const { return Policy; }
 	int32 NumPendingRegions() const { return PendingQueue.Num(); }
+	/**
+	 * Moves the subsystem into a shifted world frame (Offset = old origin - new origin, what UWorld adds to positions).
+	 * Called automatically when this world's origin moves; public for worlds that rebase by other means.
+	 */
+	void ApplyWorldOriginShift(const FVector& Offset);
+	uint64 GetOriginGeneration() const { return OriginGeneration; }
 	int32 NumDeferredRegions() const { return DeferredQueue.Num(); }
 
 	/** Fired on the game thread after a build of the region finished (published, failed or rejected). Not fired for discarded completions. */
@@ -143,6 +154,8 @@ private:
 	struct FRegionRecord
 	{
 		FCustomNavRegionKey Key;
+		/** Unique per record; a region removed and requested again under the same key gets a new one. */
+		uint64 InstanceId = 0;
 		FBox WorldBounds = FBox(ForceInit);
 		FCustomNavBuildSettings Settings;
 		uint64 DesiredRevision = 0;
@@ -158,7 +171,10 @@ private:
 		TOptional<double> OldestUnpublishedChangeTime;
 		uint64 RunningRequestId = 0;
 		double RunningDispatchTime = 0.0;
-		/** The running job is past the starvation threshold: new changes do not cancel it, and it may publish as stale. */
+		/**
+		 * The running job is past the starvation threshold: new geometry changes do not cancel it, and it may publish as
+		 * stale. Cleared (and the job cancelled) by any change of the build's other inputs.
+		 */
 		bool bRunningProtected = false;
 		bool bRunningDynamicUnsupported = false;
 		bool bPublishedDynamicUnsupported = false;
@@ -172,11 +188,20 @@ private:
 		int32 DiscardedCompletions = 0;
 	};
 
+	/** Geometry: only provider output changed. Inputs: providers, bounds, settings or the world frame changed. */
+	enum class EDirtyReason : uint8
+	{
+		Geometry,
+		Inputs
+	};
+
 	bool TickScheduler(float DeltaTime);
 	void EnsureTicker();
 	bool HasUndrainedResults() const;
 	void OnBuildCompleted(FCustomNavBuildResult&& Result);
-	void MarkDirty(FRegionRecord& Record);
+	void MarkDirty(FRegionRecord& Record, EDirtyReason Reason = EDirtyReason::Geometry);
+	void InvalidateAllInternal(EDirtyReason Reason);
+	void OnWorldOriginShifted(UWorld* InWorld, FIntVector OldOrigin, FIntVector NewOrigin);
 	void EnqueuePending(const FCustomNavRegionKey& Key);
 	void PromoteDeferred();
 	double Now() const;
@@ -203,14 +228,19 @@ private:
 	/** Shared with running jobs; dropped in Deinitialize so late results go nowhere. */
 	TSharedPtr<FCustomNavBuildCompletionQueue, ESPMode::ThreadSafe> Completions;
 	FTSTicker::FDelegateHandle TickerHandle;
+	FDelegateHandle OriginShiftHandle;
 
 	uint64 WorldLifetimeId = 0;
 	uint64 NextProviderId = 1;
 	uint64 NextRequestId = 1;
+	uint64 NextRegionInstanceId = 1;
+	uint64 OriginGeneration = 0;
 	uint64 RegistryGeneration = 0;
 	uint64 ActiveRequestId = 0;
 	FCustomNavRegionKey ActiveKey;
 	int32 LaunchedJobCount = 0;
 	bool bClosing = false;
+	/** True while providers run inside TryStartBuild; nested FlushPendingBuilds calls return at once. */
+	bool bCollecting = false;
 	bool bAutoSchedule = true;
 };

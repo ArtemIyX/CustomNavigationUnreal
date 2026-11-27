@@ -27,7 +27,8 @@ namespace CustomNavigationPrivate
 
 FString FCustomNavBuildToken::ToString() const
 {
-	return FString::Printf(TEXT("world=%llu key=%s rev=%llu request=%llu"), WorldLifetimeId, *Key.ToString(), DesiredRevision, RequestId);
+	return FString::Printf(TEXT("world=%llu key=%s rev=%llu request=%llu instance=%llu origin=%llu"),
+	                       WorldLifetimeId, *Key.ToString(), DesiredRevision, RequestId, RegionInstanceId, OriginGeneration);
 }
 
 namespace CustomNavigation
@@ -72,11 +73,26 @@ namespace CustomNavigation
 			Diagnostics.Error(ECustomNavDiagnosticCode::InvalidSettings, StageValidate, Message);
 		};
 
-		if (!FMath::IsFinite(S.CellSize) || S.CellSize <= 0.f) Fail(FString::Printf(TEXT("CellSize must be > 0 (got %f)"), S.CellSize));
-		if (!FMath::IsFinite(S.CellHeight) || S.CellHeight <= 0.f) Fail(FString::Printf(TEXT("CellHeight must be > 0 (got %f)"), S.CellHeight));
-		if (!FMath::IsFinite(S.AgentRadius) || S.AgentRadius < 0.f) Fail(FString::Printf(TEXT("AgentRadius must be >= 0 (got %f)"), S.AgentRadius));
-		if (!FMath::IsFinite(S.AgentMaxClimb) || S.AgentMaxClimb < 0.f) Fail(FString::Printf(TEXT("AgentMaxClimb must be >= 0 (got %f)"), S.AgentMaxClimb));
-		if (!FMath::IsFinite(S.MaxSlopeDegrees) || S.MaxSlopeDegrees < 0.f || S.MaxSlopeDegrees > 89.f) Fail(FString::Printf(TEXT("MaxSlopeDegrees must be in [0, 89] (got %f)"), S.MaxSlopeDegrees));
+		if (!FMath::IsFinite(S.CellSize) || S.CellSize <= 0.f)
+		{
+			Fail(FString::Printf(TEXT("CellSize must be > 0 (got %f)"), S.CellSize));
+		}
+		if (!FMath::IsFinite(S.CellHeight) || S.CellHeight <= 0.f)
+		{
+			Fail(FString::Printf(TEXT("CellHeight must be > 0 (got %f)"), S.CellHeight));
+		}
+		if (!FMath::IsFinite(S.AgentRadius) || S.AgentRadius < 0.f)
+		{
+			Fail(FString::Printf(TEXT("AgentRadius must be >= 0 (got %f)"), S.AgentRadius));
+		}
+		if (!FMath::IsFinite(S.AgentMaxClimb) || S.AgentMaxClimb < 0.f)
+		{
+			Fail(FString::Printf(TEXT("AgentMaxClimb must be >= 0 (got %f)"), S.AgentMaxClimb));
+		}
+		if (!FMath::IsFinite(S.MaxSlopeDegrees) || S.MaxSlopeDegrees < 0.f || S.MaxSlopeDegrees > 89.f)
+		{
+			Fail(FString::Printf(TEXT("MaxSlopeDegrees must be in [0, 89] (got %f)"), S.MaxSlopeDegrees));
+		}
 		if (S.CellHeight > 0.f && (!FMath::IsFinite(S.AgentHeight) || S.AgentHeight < 3.f * S.CellHeight))
 		{
 			Fail(FString::Printf(TEXT("AgentHeight must be >= 3 * CellHeight (%f), got %f"), 3.f * S.CellHeight, S.AgentHeight));
@@ -89,11 +105,32 @@ namespace CustomNavigation
 		{
 			Fail(TEXT("AgentHeight / CellHeight exceeds the Recast span height limit (8191)"));
 		}
-		if (S.MinRegionAreaCells < 0) Fail(TEXT("MinRegionAreaCells must be >= 0"));
-		if (S.MergeRegionAreaCells < 0) Fail(TEXT("MergeRegionAreaCells must be >= 0"));
-		if (!FMath::IsFinite(S.MaxEdgeLength) || S.MaxEdgeLength < 0.f) Fail(TEXT("MaxEdgeLength must be >= 0"));
-		if (!FMath::IsFinite(S.MaxSimplificationError) || S.MaxSimplificationError < 0.f) Fail(TEXT("MaxSimplificationError must be >= 0"));
-		if (S.MaxVertsPerPoly < 3 || S.MaxVertsPerPoly > 6) Fail(FString::Printf(TEXT("MaxVertsPerPoly must be in [3, 6] (got %d)"), S.MaxVertsPerPoly));
+		if (S.CellSize > 0.f && FMath::IsFinite(S.AgentRadius) && S.AgentRadius >= 0.f
+			&& FMath::CeilToDouble(S.AgentRadius / S.CellSize) > CustomNavigation::MaxErosionRadiusCells)
+		{
+			Fail(FString::Printf(TEXT("AgentRadius / CellSize must be at most %d cells (Recast erosion limit), got %.0f"),
+			                     CustomNavigation::MaxErosionRadiusCells, FMath::CeilToDouble(S.AgentRadius / S.CellSize)));
+		}
+		if (S.MinRegionAreaCells < 0)
+		{
+			Fail(TEXT("MinRegionAreaCells must be >= 0"));
+		}
+		if (S.MergeRegionAreaCells < 0)
+		{
+			Fail(TEXT("MergeRegionAreaCells must be >= 0"));
+		}
+		if (!FMath::IsFinite(S.MaxEdgeLength) || S.MaxEdgeLength < 0.f)
+		{
+			Fail(TEXT("MaxEdgeLength must be >= 0"));
+		}
+		if (!FMath::IsFinite(S.MaxSimplificationError) || S.MaxSimplificationError < 0.f)
+		{
+			Fail(TEXT("MaxSimplificationError must be >= 0"));
+		}
+		if (S.MaxVertsPerPoly < 3 || S.MaxVertsPerPoly > 6)
+		{
+			Fail(FString::Printf(TEXT("MaxVertsPerPoly must be in [3, 6] (got %d)"), S.MaxVertsPerPoly));
+		}
 		if (S.bBuildDetailMesh)
 		{
 			if (!FMath::IsFinite(S.DetailSampleDistance) || S.DetailSampleDistance < 0.f
@@ -101,11 +138,23 @@ namespace CustomNavigation
 			{
 				Fail(FString::Printf(TEXT("DetailSampleDistance must be 0 or >= 0.9 * CellSize (got %f)"), S.DetailSampleDistance));
 			}
-			if (!FMath::IsFinite(S.DetailSampleMaxError) || S.DetailSampleMaxError < 0.f) Fail(TEXT("DetailSampleMaxError must be >= 0"));
+			if (!FMath::IsFinite(S.DetailSampleMaxError) || S.DetailSampleMaxError < 0.f)
+			{
+				Fail(TEXT("DetailSampleMaxError must be >= 0"));
+			}
 		}
-		if (S.MaxGridCells < 1) Fail(TEXT("MaxGridCells must be >= 1"));
-		if (S.MaxInputVertices < 3) Fail(TEXT("MaxInputVertices must be >= 3"));
-		if (S.MaxInputTriangles < 1) Fail(TEXT("MaxInputTriangles must be >= 1"));
+		if (S.MaxGridCells < 1)
+		{
+			Fail(TEXT("MaxGridCells must be >= 1"));
+		}
+		if (S.MaxInputVertices < 3)
+		{
+			Fail(TEXT("MaxInputVertices must be >= 3"));
+		}
+		if (S.MaxInputTriangles < 1)
+		{
+			Fail(TEXT("MaxInputTriangles must be >= 1"));
+		}
 
 		return Diagnostics.ErrorCount == ErrorsBefore;
 	}

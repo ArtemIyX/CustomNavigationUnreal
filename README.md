@@ -90,10 +90,13 @@ Rules for requests:
 | `DebounceSeconds` | 0.1 | A dirty region waits until it has had no new change for this long. |
 | `MaxLatencySeconds` | 1.0 | ...but starts no later than this after its first change, even if changes keep coming. |
 | `MaxPendingRegions` | 64 | Size of the pending queue. Further dirty regions become `Deferred` (0 = no limit). |
+| `bPublishStaleUnderChurn` | true | Allows the starvation guard below. When false, every change cancels the running build and only current meshes are published. |
 
 Rules:
 - Among due regions the oldest queued starts first. A region still inside its debounce window does not block others. Repeated changes keep a region's place in the queue.
-- **No starvation.** A change normally cancels the running build of that region. Once the region's oldest unpublished change is `MaxLatencySeconds` old, the running build is no longer cancelled. If it finishes while newer changes are pending, its mesh is published **as stale** (`bPublishedIsStale`, warning `PublishedUnderChurn`) and the next build follows. So geometry that changes every frame still gets a fresh mesh about every `MaxLatencySeconds`, readable with `GetPublishedRegion(Key, true)`.
+- **No starvation.** A change normally cancels the running build of that region. Once the region's oldest unpublished change is `MaxLatencySeconds` old, the running build is no longer cancelled. If it finishes while newer changes are pending, its mesh is published **as stale** (`bPublishedIsStale`, warning `PublishedUnderChurn`) and the next build follows. So geometry that changes every frame still gets a fresh mesh about every `MaxLatencySeconds`, readable with `GetPublishedRegion(Key, true)`. `GetPublishedRegion(Key)` without the flag keeps returning only a current mesh.
+- **The guard covers geometry changes only.** A stale mesh is published only if the build had the same inputs as the region has now, just older geometry. Registering or unregistering a provider, changing a region's bounds or settings, removing and re-creating a region, and a world origin shift all drop the protection, cancel the running build and discard its result. So a mesh built from a provider that has gone away is never published.
+- **One collection per region per pass.** Providers run on the game thread inside `FlushPendingBuilds`. A provider that invalidates the subsystem from `CollectGeometry` does not cause a retry in the same pass: the region stays pending and is tried again on the next tick. A nested `FlushPendingBuilds` from a provider is ignored. If the region is removed or re-created during collection, the collected snapshot is dropped; each region record has its own instance id, so a re-created region with the same key and revision never receives the old result.
 - **Deferred.** Overflow regions wait in FIFO order with state `Deferred` and move to the pending queue as soon as room frees. Each region is queued at most once, so memory is bounded by the region count.
 
 ### Region states
@@ -189,6 +192,8 @@ Contract:
   - the region was removed;
   - the request id does not match;
   - the revision is no longer desired;
+  - the region was re-created, or its inputs changed, after the build started;
+  - the world origin moved after the build started;
   - the build was cancelled.
 
   Only a result for the current revision is published.
@@ -221,7 +226,11 @@ Build settings in centimeters are converted to Recast voxel units:
 | `AgentRadius` | `walkableRadius = ceil(AgentRadius / CellSize)` |
 | `MaxEdgeLength` | `maxEdgeLen = floor(MaxEdgeLength / CellSize)` |
 
-`MaxSimplificationError` is in cells. `DetailSampleDistance` and `DetailSampleMaxError` are in cm.
+`MaxSimplificationError` is in cells. `DetailSampleDistance` and `DetailSampleMaxError` are in cm. `DetailSampleDistance = 0` turns detail sampling off: each polygon is triangulated as is (the vendored Recast is patched here, upstream read out of bounds in this case).
+
+`walkableRadius` is limited to **127 cells**: Recast stores the erosion distance doubled in a byte, so 128 cells would wrap to 0 and erode nothing. Validation rejects a larger `AgentRadius / CellSize` with `InvalidSettings`; raise `CellSize` for very wide agents.
+
+**World origin shift.** On `FCoreDelegates::PostWorldOriginOffset` for its own world (or a direct `ApplyWorldOriginShift` call), the subsystem moves every region's bounds with the world, drops all published meshes (they are in the old frame), rebuilds every region and discards builds that started before the shift. `GetOriginGeneration()` counts the shifts.
 
 ## Validation and diagnostics
 
@@ -278,12 +287,15 @@ Close the editor, build the editor target, then run:
 | `CustomNavigation.Build.Coordinates` | Axis swap, round trip, winding after the rewind |
 | `CustomNavigation.Build.Validation` | Every validation code, degenerate handling, bounded diagnostics |
 | `CustomNavigation.Build.Collector` | Duplicate, priority and conflict rules |
+| `CustomNavigation.Build.Limits` | Erosion radius 127 cells builds with real clearance, 128 is rejected; `DetailSampleDistance = 0` builds a detail mesh |
 | `CustomNavigation.Build.Recast` | Plane area (erosion), CCW polygons, +Z detail mesh, far-from-origin build, downward, wall-only and null-area input, obstacle, default scene, cancellation, malformed snapshot |
 | `CustomNavigation.Coordinator.Publish` | Pending, building and ready; request sharing; invalidation by bounds; stale access; mesh outliving the world |
 | `CustomNavigation.Coordinator.StaleResult` | Result N discarded after a change, N+1 published, removed region not resurrected |
 | `CustomNavigation.Coordinator.Teardown` | World destroyed during a build; the job runs after the subsystem is garbage collected |
 | `CustomNavigation.Coordinator.Failures` | Invalid settings or geometry (no worker), provider failure and retry, duplicates and conflict, empty input |
-| `CustomNavigation.Coordinator.Scheduling` | Debounce, max latency under constant changes, starvation guard (stale publish), pending limit with `Deferred`, provider without change reports |
+| `CustomNavigation.Coordinator.Scheduling` | Debounce, max latency under constant changes, starvation guard (stale publish), pending limit with `Deferred`, provider without change reports, provider leaving during a protected build (result discarded) |
+| `CustomNavigation.Coordinator.ProviderReentry` | Provider that invalidates during collection (no loop), nested `FlushPendingBuilds`, region removed and re-created during its own collection |
+| `CustomNavigation.Coordinator.OriginShift` | Origin shift drops published meshes, discards an in-flight build, moves bounds; other worlds ignored |
 | `CustomNavigation.Coordinator.AsyncSmoke` | Real path: the job runs on the `CustomNavBuild` thread and the ticker applies the result |
 | `CustomNavigation.API.*`, `CustomNavigation.Workflow.*` | Raw Recast and Detour smoke tests |
 

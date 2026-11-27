@@ -20,6 +20,10 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavBuildToken
 	uint64 DesiredRevision = 0;
 	/** Unique per dispatched job. */
 	uint64 RequestId = 0;
+	/** Unique per region record: a region removed and requested again under the same key gets a new id. */
+	uint64 RegionInstanceId = 0;
+	/** World-origin generation at dispatch; the mesh is in that frame. */
+	uint64 OriginGeneration = 0;
 
 	FString ToString() const;
 };

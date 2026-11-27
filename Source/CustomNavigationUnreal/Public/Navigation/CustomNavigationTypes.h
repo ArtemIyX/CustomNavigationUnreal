@@ -21,6 +21,12 @@ namespace CustomNavigation::Area
 	inline constexpr uint8 Max = 63;
 }
 
+namespace CustomNavigation
+{
+	/** Largest agent radius in cells (ceil(AgentRadius / CellSize)). Recast stores twice the erosion distance in a byte. */
+	inline constexpr int32 MaxErosionRadiusCells = 127;
+}
+
 /**
  * Settings for one region build. All distances are in Unreal units (centimeters).
  * Values are copied into the build snapshot, so changing them after a request does not affect a running build.
@@ -39,7 +45,7 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavBuildSettings
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Voxels", meta = (ClampMin = "1.0"))
 	float CellHeight = 10.f;
 
-	/** Agent radius [cm]. The walkable area is eroded by this amount away from walls and region edges. */
+	/** Agent radius [cm]. The walkable area is eroded by this amount away from walls and region edges. At most 127 cells (ceil(AgentRadius / CellSize)). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Agent", meta = (ClampMin = "0.0"))
 	float AgentRadius = 34.f;
 
@@ -358,7 +364,8 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavRegionStatus
  *
  * Without starvation: a region that keeps changing still gets a build at least every MaxLatencySeconds,
  * and once it has gone that long without any published update a running build is no longer cancelled by new
- * changes; its result is published as stale (bPublishedIsStale) and the newest revision builds next.
+ * geometry changes; its result is published as stale (bPublishedIsStale) and the newest revision builds next.
+ * See bPublishStaleUnderChurn for what disqualifies a build.
  */
 struct CUSTOMNAVIGATIONUNREAL_API FCustomNavSchedulingPolicy
 {
@@ -368,4 +375,10 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavSchedulingPolicy
 	double MaxLatencySeconds = 1.0;
 	/** Regions allowed in the pending queue at once; more become Deferred (FIFO). 0 = no limit. */
 	int32 MaxPendingRegions = 64;
+	/**
+	 * Allows the starvation guard to publish an obsolete build as stale. Only geometry churn qualifies: a build is never
+	 * published if providers were registered or unregistered, the region's bounds or settings changed, the region was
+	 * re-created, or the world origin moved after it was dispatched. False = obsolete builds are always discarded.
+	 */
+	bool bPublishStaleUnderChurn = true;
 };

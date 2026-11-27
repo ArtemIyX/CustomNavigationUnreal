@@ -164,10 +164,17 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 	// Unit conversion to voxels (same rounding as Unreal's and Recast's samples).
 	const float Cs = S.CellSize;
 	const float Ch = S.CellHeight;
-	const int WalkableHeight = FMath::CeilToInt(S.AgentHeight / Ch);
-	const int WalkableClimb = FMath::FloorToInt(S.AgentMaxClimb / Ch);
-	const int WalkableRadius = FMath::CeilToInt(S.AgentRadius / Cs);
-	const int MaxEdgeLen = FMath::FloorToInt(S.MaxEdgeLength / Cs);
+	const int32 WalkableHeight = FMath::CeilToInt(S.AgentHeight / Ch);
+	const int32 WalkableClimb = FMath::FloorToInt(S.AgentMaxClimb / Ch);
+	const int32 WalkableRadius = FMath::CeilToInt(S.AgentRadius / Cs);
+	const int32 MaxEdgeLen = FMath::FloorToInt(S.MaxEdgeLength / Cs);
+	if (WalkableRadius > CustomNavigation::MaxErosionRadiusCells)
+	{
+		// Validation rejects this; never let Recast narrow it to a byte and erode nothing.
+		Diag.Error(ECustomNavDiagnosticCode::InvalidSettings, StageErode, FString::Printf(
+			TEXT("AgentRadius is %d cells, Recast erosion supports at most %d"), WalkableRadius, CustomNavigation::MaxErosionRadiusCells));
+		return Finish(ECustomNavBuildStatus::InvalidInput);
+	}
 
 	const float BMin[3] = {Snapshot.RecastBoundsMin.X, Snapshot.RecastBoundsMin.Y, Snapshot.RecastBoundsMin.Z};
 	const float BMax[3] = {Snapshot.RecastBoundsMax.X, Snapshot.RecastBoundsMax.Y, Snapshot.RecastBoundsMax.Z};
@@ -193,7 +200,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 			return StageFailed(StageHeightfield, TEXT("rcCreateHeightfield failed"));
 		}
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 2. Areas: keep provider area ids, null out triangles steeper than the slope limit.
 	TArray<uint8> Areas = Snapshot.TriangleAreas;
@@ -213,16 +223,31 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 		}
 	}
 	Areas.Empty();
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 4. Filters
 	{
 		FStageScope Scope(Timings, Ctx, StageFilter);
-		if (S.bFilterLowHangingObstacles) rcFilterLowHangingWalkableObstacles(&Ctx, WalkableClimb, *Solid);
-		if (S.bFilterLedgeSpans) rcFilterLedgeSpans(&Ctx, WalkableHeight, WalkableClimb, *Solid);
-		if (S.bFilterWalkableLowHeightSpans) rcFilterWalkableLowHeightSpans(&Ctx, WalkableHeight, *Solid);
+		if (S.bFilterLowHangingObstacles)
+		{
+			rcFilterLowHangingWalkableObstacles(&Ctx, WalkableClimb, *Solid);
+		}
+		if (S.bFilterLedgeSpans)
+		{
+			rcFilterLedgeSpans(&Ctx, WalkableHeight, WalkableClimb, *Solid);
+		}
+		if (S.bFilterWalkableLowHeightSpans)
+		{
+			rcFilterWalkableLowHeightSpans(&Ctx, WalkableHeight, *Solid);
+		}
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 5. Compact heightfield (only walkable spans survive)
 	FCompactPtr Chf(rcAllocCompactHeightfield());
@@ -243,7 +268,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 	{
 		return NoWalkable(StageCompact, TEXT("No walkable spans (no upward-facing surfaces within the slope limit, or the agent does not fit)"));
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 6. Erode by agent radius
 	{
@@ -253,7 +281,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 			return StageFailed(StageErode, TEXT("rcErodeWalkableArea failed"));
 		}
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 7. Distance field + watershed regions
 	{
@@ -263,7 +294,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 			return StageFailed(StageDistanceField, TEXT("rcBuildDistanceField failed"));
 		}
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 	{
 		FStageScope Scope(Timings, Ctx, StageRegions);
 		if (!rcBuildRegions(&Ctx, *Chf, 0, S.MinRegionAreaCells, S.MergeRegionAreaCells))
@@ -271,7 +305,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 			return StageFailed(StageRegions, TEXT("rcBuildRegions failed"));
 		}
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 8. Contours
 	FContourSetPtr Cset(rcAllocContourSet());
@@ -291,7 +328,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 	{
 		return NoWalkable(StageContours, TEXT("No contours: walkable area vanished after erosion or region filtering (MinRegionAreaCells / AgentRadius too large?)"));
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 9. Polygon mesh
 	FPolyMeshPtr PMesh(rcAllocPolyMesh());
@@ -312,7 +352,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 	{
 		return NoWalkable(StagePolyMesh, TEXT("Poly mesh is empty"));
 	}
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 10. Detail mesh
 	FDetailMeshPtr DMesh(nullptr);
@@ -331,7 +374,10 @@ FCustomNavBuildResult FCustomNavRecastBuilder::Build(const FCustomNavBuildSnapsh
 		}
 	}
 	Chf.Reset();
-	if (IsCancelled()) return Finish(ECustomNavBuildStatus::Cancelled);
+	if (IsCancelled())
+	{
+		return Finish(ECustomNavBuildStatus::Cancelled);
+	}
 
 	// 11. Copy into the engine-side immutable mesh (world space).
 	TSharedPtr<FCustomNavRegionMesh, ESPMode::ThreadSafe> Mesh = MakeShared<FCustomNavRegionMesh, ESPMode::ThreadSafe>();

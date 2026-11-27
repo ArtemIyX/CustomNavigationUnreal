@@ -4,6 +4,7 @@
 #include "Tests/AutomationCommon.h"
 #include "Engine/World.h"
 #include "HAL/ThreadManager.h"
+#include "Misc/CoreDelegates.h"
 #include "Navigation/CustomNavigationTypes.h"
 #include "Navigation/CustomNavigationGeometryProvider.h"
 #include "Navigation/CustomNavigationHardcodedProvider.h"
@@ -74,6 +75,30 @@ namespace CustomNavigationTests
 		FCustomNavBuildSnapshot Out;
 		return CustomNavigation::BuildSnapshot(MakeToken(), Bounds, Settings, Chunks, Out, OutDiagnostics);
 	}
+
+	/** Hardcoded provider that runs a test callback at the start of every collection (re-entry tests). */
+	class FCallbackProvider : public FCustomNavHardcodedGeometryProvider
+	{
+	public:
+		FCallbackProvider()
+			: FCustomNavHardcodedGeometryProvider(TEXT("Callback"))
+		{
+		}
+
+		TFunction<void()> OnCollect;
+		int32 CollectCount = 0;
+
+		virtual ECustomNavCollectStatus CollectGeometry(const FCustomNavGeometryRequest& Request, FCustomNavGeometryCollector& Collector,
+		                                                FCustomNavDiagnostics& Diagnostics) override
+		{
+			++CollectCount;
+			if (OnCollect)
+			{
+				OnCollect();
+			}
+			return FCustomNavHardcodedGeometryProvider::CollectGeometry(Request, Collector, Diagnostics);
+		}
+	};
 
 	/** Executor that only queues work; the test decides when it runs. Results land in the subsystem's completion queue. */
 	struct FManualQueue
@@ -352,6 +377,62 @@ bool FCustomNavCollectorTest::RunTest(const FString& Parameters)
 		const TArray<int32> BadIndices{0, 1};
 		TestFalse(TEXT("Malformed chunk rejected"), Collector.AddChunk(FCustomNavSourceKey(TEXT("X"), 1), 1, Verts, BadIndices));
 		TestTrue(TEXT("Malformed reported"), Diagnostics.HasErrors());
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Recast limits: erosion radius and zero detail sampling
+// ---------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavLimitsTest, "CustomNavigation.Build.Limits", CustomNavigationTests::Flags)
+
+bool FCustomNavLimitsTest::RunTest(const FString& Parameters)
+{
+	using namespace CustomNavigationTests;
+	const double HalfSize = 800.0;
+
+	// Erosion distance is stored doubled in a byte: 127 cells is the largest radius Recast can honour.
+	{
+		FCustomNavBuildSettings Settings;
+		Settings.CellSize = 4.f;
+		Settings.AgentRadius = 127.f * Settings.CellSize;
+		FCustomNavDiagnostics Diagnostics;
+		TestEqual(FString::Printf(TEXT("127 cells accepted\n%s"), *Diagnostics.ToString()),
+		          Snapshot({MakePlaneChunk(HalfSize)}, Diagnostics, TestBounds(), Settings), ECustomNavBuildStatus::Success);
+
+		const FCustomNavBuildResult Result = BuildChunks({MakePlaneChunk(HalfSize)}, TestBounds(), Settings);
+		if (TestEqual(FString::Printf(TEXT("127 cells builds\n%s"), *Result.Diagnostics.ToString()), Result.Status, ECustomNavBuildStatus::Success)
+			&& TestTrue(TEXT("127 cells mesh"), Result.Mesh.IsValid()))
+		{
+			// Real clearance: the plane shrinks by the radius on every side.
+			const double Expected = FMath::Square(2.0 * (HalfSize - Settings.AgentRadius));
+			const double Area = Result.Mesh->ComputeProjectedArea();
+			TestTrue(FString::Printf(TEXT("127 cells eroded: area %.0f close to %.0f"), Area, Expected), FMath::Abs(Area - Expected) < Expected * 0.1);
+		}
+
+		Settings.AgentRadius = 128.f * Settings.CellSize;
+		Diagnostics = FCustomNavDiagnostics();
+		TestEqual(TEXT("128 cells rejected"), Snapshot({MakePlaneChunk(HalfSize)}, Diagnostics, TestBounds(), Settings), ECustomNavBuildStatus::InvalidInput);
+		TestTrue(FString::Printf(TEXT("128 cells: InvalidSettings\n%s"), *Diagnostics.ToString()), Diagnostics.Contains(ECustomNavDiagnosticCode::InvalidSettings));
+
+		Settings.AgentRadius = 127.5f * Settings.CellSize; // rounds up to 128
+		Diagnostics = FCustomNavDiagnostics();
+		TestEqual(TEXT("127.5 cells rejected"), Snapshot({MakePlaneChunk(HalfSize)}, Diagnostics, TestBounds(), Settings), ECustomNavBuildStatus::InvalidInput);
+	}
+
+	// DetailSampleDistance = 0 disables sampling; the detail mesh is then the polygon triangulated as is.
+	{
+		FCustomNavBuildSettings Settings;
+		Settings.DetailSampleDistance = 0.f;
+		const FCustomNavBuildResult Result = BuildChunks({MakePlaneChunk(HalfSize)}, TestBounds(), Settings);
+		if (TestEqual(FString::Printf(TEXT("Zero sampling builds\n%s"), *Result.Diagnostics.ToString()), Result.Status, ECustomNavBuildStatus::Success)
+			&& TestTrue(TEXT("Zero sampling mesh"), Result.Mesh.IsValid()))
+		{
+			const FCustomNavRegionMesh& Mesh = *Result.Mesh;
+			TestTrue(TEXT("Zero sampling: detail triangles"), Mesh.DetailTriangles.Num() > 0 && Mesh.DetailTriangles.Num() == Mesh.DetailTrianglePolys.Num() * 3);
+			TestTrue(TEXT("Zero sampling: at least one triangle per polygon"), Mesh.DetailTrianglePolys.Num() >= Mesh.NumPolygons());
+		}
 	}
 	return true;
 }
@@ -882,6 +963,38 @@ bool FCustomNavCoordinatorSchedulingTest::RunTest(const FString& Parameters)
 	Status = Sub.GetRegionStatus(Request.Key);
 	TestEqual(TEXT("Churn: settles to ready"), Status.State, ECustomNavRegionState::Ready);
 	TestFalse(TEXT("Churn: current"), Status.bPublishedIsStale);
+
+	// --- Churn protection ends as soon as anything but geometry changes: here a provider leaves. ---
+	TSharedRef<FCustomNavHardcodedGeometryProvider> Extra = MakeShared<FCustomNavHardcodedGeometryProvider>(TEXT("Extra"));
+	Extra->AddBox(FBox(FVector(300, 300, 0), FVector(500, 500, 200)));
+	Time = 25.0;
+	const FCustomNavGeometryProviderHandle ExtraHandle = Sub.RegisterGeometryProvider(Extra);
+	Time = 25.2;
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	Status = Sub.GetRegionStatus(Request.Key);
+	TestEqual(FString::Printf(TEXT("Leave: ready with the extra provider (state %d, launched %d, discarded %d)\n%s"), int32(Status.State),
+	                         Sub.GetLaunchedJobCount(), Status.DiscardedCompletions, *Status.LastDiagnostics.ToString()),
+	          Status.State, ECustomNavRegionState::Ready);
+	const uint64 PublishedWithExtra = Status.PublishedRevision;
+
+	Time = 26.0;
+	Sub.InvalidateAll();
+	Time = 26.2;
+	Sub.FlushPendingBuilds(); // job D
+	Time = 27.0;
+	Sub.InvalidateAll(); // D is protected now
+	const int32 DiscardedBeforeLeave = Sub.GetRegionStatus(Request.Key).DiscardedCompletions;
+	Sub.UnregisterGeometryProvider(ExtraHandle); // D's input set is gone: cancelled, protection dropped
+	Env.RunAll();
+	Status = Sub.GetRegionStatus(Request.Key);
+	TestEqual(TEXT("Leave: D discarded"), Status.DiscardedCompletions, DiscardedBeforeLeave + 1);
+	TestEqual(TEXT("Leave: published revision unchanged"), Status.PublishedRevision, PublishedWithExtra);
+	TestFalse(TEXT("Leave: no diagnostic from D"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::PublishedUnderChurn));
+	Time = 27.2;
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	TestEqual(TEXT("Leave: ready without the provider"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
 	Sub.RemoveRegion(Request.Key);
 
 	// --- Pending limit: overflow is Deferred, observable, and promoted in FIFO order. ---
@@ -931,6 +1044,159 @@ bool FCustomNavCoordinatorSchedulingTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("Dynamic: still builds"), Status.State, ECustomNavRegionState::Ready);
 	TestTrue(TEXT("Dynamic: flagged unsupported"), Status.bDynamicCorrectnessUnsupported);
 	TestTrue(TEXT("Dynamic: warning"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::ProviderChangesNotReported));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavCoordinatorReentryTest, "CustomNavigation.Coordinator.ProviderReentry", CustomNavigationTests::Flags)
+
+bool FCustomNavCoordinatorReentryTest::RunTest(const FString& Parameters)
+{
+	using namespace CustomNavigationTests;
+	FCoordinatorEnv Env;
+	if (!Env.Init(*this))
+	{
+		return false;
+	}
+	UCustomNavigationWorldSubsystem& Sub = *Env.Subsystem;
+	TSharedRef<FCallbackProvider> Callback = MakeShared<FCallbackProvider>();
+	Callback->AddPlane(FVector(5000.0, 0.0, 0.0), FVector2D(800.0)); // only for the re-created region below
+	Sub.RegisterGeometryProvider(Callback);
+
+	// --- A provider that invalidates during every collection (zero debounce) must not trap the game thread. ---
+	const FCustomNavRegionRequest Request = Env.MakeRequest();
+	Sub.RequestRegionBuild(Request);
+	Callback->OnCollect = [&Sub]() { Sub.InvalidateAll(); };
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Churning provider: one collection per pass"), Callback->CollectCount, 1);
+	TestEqual(TEXT("Churning provider: nothing launched"), Sub.GetLaunchedJobCount(), 0);
+	TestEqual(TEXT("Churning provider: still pending"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Pending);
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Churning provider: next pass retries"), Callback->CollectCount, 2);
+	Callback->OnCollect = nullptr;
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Quiet provider: launched"), Sub.GetLaunchedJobCount(), 1);
+	Env.RunAll();
+	TestEqual(TEXT("Quiet provider: ready"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
+
+	// --- A provider that calls FlushPendingBuilds from CollectGeometry cannot start a second build. ---
+	const FCustomNavRegionRequest A = Env.MakeRequest(TEXT("A"));
+	const FCustomNavRegionRequest B = Env.MakeRequest(TEXT("B"));
+	Sub.RequestRegionBuild(A);
+	Sub.RequestRegionBuild(B);
+	Callback->OnCollect = [&Sub]() { Sub.FlushPendingBuilds(); };
+	const int32 LaunchedBefore = Sub.GetLaunchedJobCount();
+	Sub.FlushPendingBuilds();
+	Callback->OnCollect = nullptr;
+	TestEqual(TEXT("Nested flush: one job"), Sub.GetLaunchedJobCount(), LaunchedBefore + 1);
+	TestEqual(TEXT("Nested flush: A building"), Sub.GetRegionStatus(A.Key).State, ECustomNavRegionState::Building);
+	TestEqual(TEXT("Nested flush: B waits"), Sub.GetRegionStatus(B.Key).State, ECustomNavRegionState::Pending);
+	TestEqual(TEXT("Nested flush: one queued job"), Env.Queue->Workers.Num(), 1);
+	Env.RunAll();
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	TestEqual(TEXT("Nested flush: A ready"), Sub.GetRegionStatus(A.Key).State, ECustomNavRegionState::Ready);
+	TestEqual(TEXT("Nested flush: B ready"), Sub.GetRegionStatus(B.Key).State, ECustomNavRegionState::Ready);
+
+	// --- Removing and re-creating a region during its own first collection. Both records reach revision 1. ---
+	const FCustomNavRegionRequest Original = Env.MakeRequest(TEXT("Moved"));
+	FCustomNavRegionRequest Moved = Original;
+	Moved.WorldBounds = TestBounds().ShiftBy(FVector(5000.0, 0.0, 0.0));
+	TestEqual(TEXT("Recreate: first revision"), Sub.RequestRegionBuild(Original), uint64(1));
+	bool bFired = false;
+	uint64 MovedRevision = 0;
+	Callback->OnCollect = [&Sub, &bFired, &MovedRevision, &Original, &Moved]()
+	{
+		if (!bFired)
+		{
+			bFired = true;
+			Sub.RemoveRegion(Original.Key);
+			MovedRevision = Sub.RequestRegionBuild(Moved);
+		}
+	};
+	const int32 LaunchedBeforeRecreate = Sub.GetLaunchedJobCount();
+	Sub.FlushPendingBuilds();
+	Callback->OnCollect = nullptr;
+	TestEqual(TEXT("Recreate: replacement has the same revision"), MovedRevision, uint64(1));
+	TestEqual(TEXT("Recreate: old collection not dispatched"), Sub.GetLaunchedJobCount(), LaunchedBeforeRecreate);
+	TestEqual(TEXT("Recreate: replacement pending"), Sub.GetRegionStatus(Moved.Key).State, ECustomNavRegionState::Pending);
+	TestFalse(TEXT("Recreate: nothing published"), Sub.GetPublishedRegion(Moved.Key, true).IsValid());
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	TestEqual(TEXT("Recreate: replacement ready"), Sub.GetRegionStatus(Moved.Key).State, ECustomNavRegionState::Ready);
+	if (const FCustomNavRegionMeshPtr Mesh = Sub.GetPublishedRegion(Moved.Key))
+	{
+		for (const FVector& V : Mesh->PolyVertices)
+		{
+			if (!TestTrue(FString::Printf(TEXT("Recreate: mesh at the new location (x = %.0f)"), V.X), V.X > 3000.0))
+			{
+				break;
+			}
+		}
+	}
+	else
+	{
+		AddError(TEXT("Recreate: no mesh"));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavCoordinatorOriginShiftTest, "CustomNavigation.Coordinator.OriginShift", CustomNavigationTests::Flags)
+
+bool FCustomNavCoordinatorOriginShiftTest::RunTest(const FString& Parameters)
+{
+	using namespace CustomNavigationTests;
+	FCoordinatorEnv Env;
+	if (!Env.Init(*this))
+	{
+		return false;
+	}
+	UCustomNavigationWorldSubsystem& Sub = *Env.Subsystem;
+	UWorld* World = Env.World.GetTestWorld();
+	const FCustomNavRegionRequest Request = Env.MakeRequest();
+
+	Sub.RequestRegionBuild(Request);
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	TestEqual(TEXT("Built before the shift"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
+
+	// Another world's shift is ignored.
+	FCoreDelegates::PostWorldOriginOffset.Broadcast(nullptr, FIntVector::ZeroValue, FIntVector(500, 0, 0));
+	TestEqual(TEXT("Other world ignored"), Sub.GetOriginGeneration(), uint64(0));
+
+	// Moving the origin by +500 X moves every position by -500 X. The old mesh is in the old frame: dropped.
+	FCoreDelegates::PostWorldOriginOffset.Broadcast(World, FIntVector::ZeroValue, FIntVector(500, 0, 0));
+	TestEqual(TEXT("Generation advanced"), Sub.GetOriginGeneration(), uint64(1));
+	TestFalse(TEXT("Old-frame mesh dropped"), Sub.GetPublishedRegion(Request.Key, true).IsValid());
+	TestEqual(TEXT("Rebuilding"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Pending);
+
+	// A shift between dispatch and completion: the result is in the previous frame and is discarded.
+	Sub.FlushPendingBuilds();
+	const int32 DiscardedBefore = Sub.GetRegionStatus(Request.Key).DiscardedCompletions;
+	FCoreDelegates::PostWorldOriginOffset.Broadcast(World, FIntVector(500, 0, 0), FIntVector(1000, 0, 0));
+	Env.RunAll();
+	FCustomNavRegionStatus Status = Sub.GetRegionStatus(Request.Key);
+	TestEqual(TEXT("Old-frame result discarded"), Status.DiscardedCompletions, DiscardedBefore + 1);
+	TestEqual(TEXT("Nothing published"), Status.PublishedRevision, uint64(0));
+	TestEqual(TEXT("Still pending"), Status.State, ECustomNavRegionState::Pending);
+
+	// Bounds followed the world: [-1000, 1000] moved by -1000 X is [-2000, 0]; the plane [-800, 800] stays in world space.
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	TestEqual(TEXT("Ready in the new frame"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
+	if (const FCustomNavRegionMeshPtr Mesh = Sub.GetPublishedRegion(Request.Key))
+	{
+		for (const FVector& V : Mesh->PolyVertices)
+		{
+			if (!TestTrue(FString::Printf(TEXT("Vertex inside the shifted bounds (x = %.1f)"), V.X), V.X <= 1.0 && V.X >= -801.0))
+			{
+				break;
+			}
+		}
+	}
+	else
+	{
+		AddError(TEXT("No mesh after the shift"));
+	}
 	return true;
 }
 

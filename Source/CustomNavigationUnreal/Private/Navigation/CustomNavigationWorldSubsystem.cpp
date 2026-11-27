@@ -7,6 +7,7 @@
 #include "Engine/World.h"
 #include "HAL/IConsoleManager.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/CoreDelegates.h"
 #include <atomic>
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(CustomNavigationWorldSubsystem)
@@ -48,11 +49,14 @@ void UCustomNavigationWorldSubsystem::Initialize(FSubsystemCollectionBase& Colle
 	Executor = FCustomNavBuildExecutor::MakeDefault();
 	Completions = MakeShared<FCustomNavBuildCompletionQueue, ESPMode::ThreadSafe>();
 	bClosing = false;
+	OriginShiftHandle = FCoreDelegates::PostWorldOriginOffset.AddUObject(this, &UCustomNavigationWorldSubsystem::OnWorldOriginShifted);
 }
 
 void UCustomNavigationWorldSubsystem::Deinitialize()
 {
 	bClosing = true;
+	FCoreDelegates::PostWorldOriginOffset.Remove(OriginShiftHandle);
+	OriginShiftHandle.Reset();
 
 	// Running jobs keep their own copy of the snapshot and their own reference to the completion queue; cancel them.
 	// Dropping our reference means their results are never read and die with the job.
@@ -103,7 +107,7 @@ FCustomNavGeometryProviderHandle UCustomNavigationWorldSubsystem::RegisterGeomet
 	++RegistryGeneration;
 
 	UE_LOG(LogCustomNavigation, Verbose, TEXT("Registered provider %s (priority %d)"), *Provider->GetDebugName(), Priority);
-	InvalidateAll();
+	InvalidateAllInternal(EDirtyReason::Inputs);
 	return Entry.Handle;
 }
 
@@ -118,7 +122,7 @@ void UCustomNavigationWorldSubsystem::UnregisterGeometryProvider(FCustomNavGeome
 	if (Removed > 0)
 	{
 		++RegistryGeneration;
-		InvalidateAll();
+		InvalidateAllInternal(EDirtyReason::Inputs);
 	}
 }
 
@@ -143,17 +147,22 @@ void UCustomNavigationWorldSubsystem::InvalidateGeometry(const FBox& Bounds)
 void UCustomNavigationWorldSubsystem::InvalidateAll()
 {
 	check(IsInGameThread());
+	InvalidateAllInternal(EDirtyReason::Geometry);
+}
+
+void UCustomNavigationWorldSubsystem::InvalidateAllInternal(EDirtyReason Reason)
+{
 	if (bClosing)
 	{
 		return;
 	}
 	for (TPair<FCustomNavRegionKey, FRegionRecord>& Pair : Regions)
 	{
-		MarkDirty(Pair.Value);
+		MarkDirty(Pair.Value, Reason);
 	}
 }
 
-void UCustomNavigationWorldSubsystem::MarkDirty(FRegionRecord& Record)
+void UCustomNavigationWorldSubsystem::MarkDirty(FRegionRecord& Record, EDirtyReason Reason)
 {
 	const double Time = Now();
 	++Record.DesiredRevision;
@@ -169,10 +178,19 @@ void UCustomNavigationWorldSubsystem::MarkDirty(FRegionRecord& Record)
 	}
 
 	// A running job is now building an obsolete revision. Normally stop it early (its completion will be discarded),
-	// but not when the region has gone too long without any update: then let it finish and publish it as stale.
-	if (Record.RunningCancellation.IsValid() && !Record.bRunningProtected)
+	// but not when only geometry keeps changing and the region has gone too long without any update: then let it
+	// finish and publish it as stale. Any other input change makes its result wrong, not just old.
+	if (Reason == EDirtyReason::Inputs)
 	{
-		if (IsStarving(Record, Time))
+		Record.bRunningProtected = false;
+		if (Record.RunningCancellation.IsValid())
+		{
+			Record.RunningCancellation->Cancel();
+		}
+	}
+	else if (Record.RunningCancellation.IsValid() && !Record.bRunningProtected)
+	{
+		if (Policy.bPublishStaleUnderChurn && IsStarving(Record, Time))
 		{
 			Record.bRunningProtected = true;
 		}
@@ -338,10 +356,14 @@ uint64 UCustomNavigationWorldSubsystem::RequestRegionBuild(const FCustomNavRegio
 	}
 
 	FRegionRecord& Record = Existing ? *Existing : Regions.Add(Request.Key);
+	if (!Existing)
+	{
+		Record.InstanceId = NextRegionInstanceId++;
+	}
 	Record.Key = Request.Key;
 	Record.WorldBounds = Request.WorldBounds;
 	Record.Settings = Request.Settings;
-	MarkDirty(Record);
+	MarkDirty(Record, EDirtyReason::Inputs);
 	return Record.DesiredRevision;
 }
 
@@ -397,6 +419,14 @@ FCustomNavRegionMeshPtr UCustomNavigationWorldSubsystem::GetPublishedRegion(cons
 void UCustomNavigationWorldSubsystem::FlushPendingBuilds()
 {
 	check(IsInGameThread());
+	if (bCollecting)
+	{
+		// Called by a provider from CollectGeometry: the outer pass owns the build slot and continues on its own.
+		return;
+	}
+	// Each region is collected at most once per pass. A region invalidated during its own collection is queued again
+	// and waits for the next pass, so a provider that always invalidates cannot keep the game thread in this loop.
+	TSet<FCustomNavRegionKey, DefaultKeyFuncs<FCustomNavRegionKey>, TInlineSetAllocator<8>> Attempted;
 	while (!bClosing && ActiveRequestId == 0)
 	{
 		PromoteDeferred();
@@ -412,7 +442,7 @@ void UCustomNavigationWorldSubsystem::FlushPendingBuilds()
 				PendingQueue.RemoveAt(Index--);
 				continue;
 			}
-			if (IsDue(*Record, Time))
+			if (!Attempted.Contains(PendingQueue[Index]) && IsDue(*Record, Time))
 			{
 				DueIndex = Index;
 				break;
@@ -426,6 +456,7 @@ void UCustomNavigationWorldSubsystem::FlushPendingBuilds()
 		PendingQueue.RemoveAt(DueIndex);
 		// The freed slot goes to the oldest deferred region right away, so its state reads Pending, not Deferred.
 		PromoteDeferred();
+		Attempted.Add(Key);
 		TryStartBuild(Key);
 	}
 }
@@ -444,7 +475,9 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 	const FBox Bounds = Record->WorldBounds;
 	const FCustomNavBuildSettings Settings = Record->Settings;
 	const uint64 DesiredRevision = Record->DesiredRevision;
+	const uint64 InstanceId = Record->InstanceId;
 	const uint64 GenerationBefore = RegistryGeneration;
+	const uint64 OriginBefore = OriginGeneration;
 	Record->bPending = false;
 	Record = nullptr;
 
@@ -463,6 +496,7 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 
 	bool bCollectFailed = false;
 	bool bDynamicUnsupported = false;
+	bCollecting = true; // no early return until it is cleared below
 	for (const FProviderEntry& Entry : Ordered)
 	{
 		const FString Name = Entry.Provider->GetDebugName();
@@ -481,9 +515,12 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 		}
 	}
 	bCollectFailed |= Collector.HasConflict();
+	bCollecting = false;
 
+	// Providers may have removed the region, re-created it under the same key (same revision numbers, other bounds),
+	// changed it, or the world frame may have moved: then this collection belongs to nothing current.
 	Record = Regions.Find(Key);
-	if (!Record || bClosing)
+	if (!Record || bClosing || Record->InstanceId != InstanceId || OriginGeneration != OriginBefore)
 	{
 		return false;
 	}
@@ -508,6 +545,8 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 	Token.Key = Key;
 	Token.DesiredRevision = DesiredRevision;
 	Token.RequestId = NextRequestId++;
+	Token.RegionInstanceId = InstanceId;
+	Token.OriginGeneration = OriginBefore;
 
 	TSharedPtr<FCustomNavBuildSnapshot, ESPMode::ThreadSafe> Snapshot = MakeShared<FCustomNavBuildSnapshot, ESPMode::ThreadSafe>();
 	const ECustomNavBuildStatus SnapshotStatus = CustomNavigation::BuildSnapshot(Token, Bounds, Settings, Collector.GetChunks(), *Snapshot, Diagnostics);
@@ -589,13 +628,19 @@ void UCustomNavigationWorldSubsystem::OnBuildCompleted(FCustomNavBuildResult&& R
 		bDynamicUnsupported = Record->bRunningDynamicUnsupported;
 	}
 
-	// Starvation guard: an obsolete but successful build of a region that has been changing for too long replaces an
-	// older published mesh, flagged stale. Consumers asking for current data still get nothing until the newest
-	// revision is built; those that accept stale data get progressively fresher meshes instead of none.
+	// Built from this region record, in the current world frame. A request id match already implies the record, but
+	// the frame can move under a running job.
+	const bool bSameInputs = Token.RegionInstanceId == Record->InstanceId && Token.OriginGeneration == OriginGeneration;
+
+	// Starvation guard: an obsolete but successful build of a region whose geometry has been changing for too long
+	// replaces an older published mesh, flagged stale. Protection is dropped (and the job cancelled) as soon as
+	// anything but provider geometry changes, so only builds that were correct for an older geometry state qualify.
+	// Consumers asking for current data still get nothing until the newest revision is built; those that accept stale
+	// data get progressively fresher meshes instead of none.
 	const bool bObsolete = Token.DesiredRevision != Record->DesiredRevision;
 	const uint64 PublishedRevisionNow = Record->Published.IsValid() ? Record->PublishedRevision : 0;
-	if (bIsRunningJob && bObsolete && bWasProtected && Result.Status == ECustomNavBuildStatus::Success && Result.Mesh.IsValid()
-		&& Token.DesiredRevision > PublishedRevisionNow)
+	if (bIsRunningJob && bSameInputs && bObsolete && bWasProtected && Policy.bPublishStaleUnderChurn
+		&& Result.Status == ECustomNavBuildStatus::Success && Result.Mesh.IsValid() && Token.DesiredRevision > PublishedRevisionNow)
 	{
 		CollectDiagnostics.Append(Result.Diagnostics);
 		CollectDiagnostics.Warning(ECustomNavDiagnosticCode::PublishedUnderChurn, CustomNavigationPrivate::StageScheduleName, FString::Printf(
@@ -623,7 +668,7 @@ void UCustomNavigationWorldSubsystem::OnBuildCompleted(FCustomNavBuildResult&& R
 		return;
 	}
 
-	if (!bIsRunningJob || bObsolete || Result.Status == ECustomNavBuildStatus::Cancelled)
+	if (!bIsRunningJob || !bSameInputs || bObsolete || Result.Status == ECustomNavBuildStatus::Cancelled)
 	{
 		++Record->DiscardedCompletions;
 		UE_LOG(LogCustomNavigation, Verbose, TEXT("Discard %s: obsolete (desired revision is %llu)"), *Token.ToString(), Record->DesiredRevision);
@@ -667,6 +712,40 @@ void UCustomNavigationWorldSubsystem::OnBuildCompleted(FCustomNavBuildResult&& R
 	{
 		EnsureTicker();
 	}
+}
+
+void UCustomNavigationWorldSubsystem::OnWorldOriginShifted(UWorld* InWorld, FIntVector OldOrigin, FIntVector NewOrigin)
+{
+	if (InWorld && InWorld == GetWorld())
+	{
+		// UWorld::SetNewWorldOrigin adds (old - new) to every position.
+		ApplyWorldOriginShift(FVector(OldOrigin - NewOrigin));
+	}
+}
+
+void UCustomNavigationWorldSubsystem::ApplyWorldOriginShift(const FVector& Offset)
+{
+	check(IsInGameThread());
+	if (bClosing || Offset.IsZero())
+	{
+		return;
+	}
+	// Completions dispatched before this point carry the old generation and are discarded.
+	++OriginGeneration;
+	for (TPair<FCustomNavRegionKey, FRegionRecord>& Pair : Regions)
+	{
+		FRegionRecord& Record = Pair.Value;
+		if (Record.WorldBounds.IsValid)
+		{
+			Record.WorldBounds = Record.WorldBounds.ShiftBy(Offset);
+		}
+		// Published meshes are in the old frame: never hand them out, not even as stale.
+		Record.Published.Reset();
+		Record.PublishedRevision = 0;
+		Record.bPublishedDynamicUnsupported = false;
+		MarkDirty(Record, EDirtyReason::Inputs);
+	}
+	UE_LOG(LogCustomNavigation, Log, TEXT("World origin shifted by %s: %d regions moved and rebuilding"), *Offset.ToString(), Regions.Num());
 }
 
 void UCustomNavigationWorldSubsystem::FinishWithoutWorker(FRegionRecord& Record, ECustomNavBuildStatus Status, FCustomNavDiagnostics&& Diagnostics)
