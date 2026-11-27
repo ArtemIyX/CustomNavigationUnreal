@@ -40,9 +40,11 @@ DECLARE_MULTICAST_DELEGATE_TwoParams(FOnCustomNavRegionBuildFinished, const FCus
  *    subsystem is not closing and the job's token (world lifetime, key, desired revision, request id) still matches.
  *    Otherwise it is discarded.
  *
- * Scheduling: one active job per world. Requests and invalidations only mark a region dirty; the build starts on
- * the next ticker update (or FlushPendingBuilds), so many changes in one frame produce one build. The ticker runs
- * only while there is pending work, a running job or an undrained result.
+ * Scheduling (see FCustomNavSchedulingPolicy): one active job per world. Requests and invalidations only mark a
+ * region dirty. A dirty region starts once it has been quiet for DebounceSeconds, or MaxLatencySeconds after its
+ * first unbuilt change, whichever comes first; among due regions the oldest queued goes first. At most
+ * MaxPendingRegions wait in the pending queue, the rest are Deferred in FIFO order and promoted when room frees.
+ * The ticker runs only while there is pending work, a running job or an undrained result.
  */
 UCLASS()
 class CUSTOMNAVIGATIONUNREAL_API UCustomNavigationWorldSubsystem : public UWorldSubsystem
@@ -97,7 +99,7 @@ public:
 	 */
 	FCustomNavRegionMeshPtr GetPublishedRegion(const FCustomNavRegionKey& Key, bool bAllowStale = false) const;
 
-	/** Starts pending builds now instead of waiting for the ticker. Normally not needed. */
+	/** Starts due pending builds now instead of waiting for the ticker (debounce still applies). Normally not needed. */
 	void FlushPendingBuilds();
 
 	/**
@@ -110,6 +112,12 @@ public:
 	bool IsBuildRunning() const { return ActiveRequestId != 0; }
 	bool IsClosing() const { return bClosing; }
 
+	/** Takes effect for the next scheduling decision. Values are clamped to >= 0. */
+	void SetSchedulingPolicy(const FCustomNavSchedulingPolicy& InPolicy);
+	const FCustomNavSchedulingPolicy& GetSchedulingPolicy() const { return Policy; }
+	int32 NumPendingRegions() const { return PendingQueue.Num(); }
+	int32 NumDeferredRegions() const { return DeferredQueue.Num(); }
+
 	/** Fired on the game thread after a build of the region finished (published, failed or rejected). Not fired for discarded completions. */
 	FOnCustomNavRegionBuildFinished OnRegionBuildFinished;
 
@@ -118,6 +126,8 @@ public:
 	void SetBuildExecutorForTesting(TSharedPtr<FCustomNavBuildExecutor, ESPMode::ThreadSafe> InExecutor);
 	/** Disables the automatic ticker so tests decide when FlushPendingBuilds runs. */
 	void SetAutoScheduleForTesting(bool bEnabled) { bAutoSchedule = bEnabled; }
+	/** Replaces FPlatformTime::Seconds for debounce and latency decisions. Pass nullptr to restore it. */
+	void SetClockForTesting(TFunction<double()> InClock) { Clock = MoveTemp(InClock); }
 	uint64 GetWorldLifetimeId() const { return WorldLifetimeId; }
 	int32 GetLaunchedJobCount() const { return LaunchedJobCount; }
 
@@ -138,7 +148,20 @@ private:
 		uint64 DesiredRevision = 0;
 		uint64 PublishedRevision = 0;
 		bool bPending = false;
+		/** In DeferredQueue instead of PendingQueue. */
+		bool bDeferred = false;
+		/** Clock time of the first change since the region last left the pending state. */
+		double FirstDirtyTime = 0.0;
+		/** Clock time of the latest change. */
+		double LastDirtyTime = 0.0;
+		/** Clock time of the oldest change not reflected in any published mesh or final outcome. Unset when up to date. */
+		TOptional<double> OldestUnpublishedChangeTime;
 		uint64 RunningRequestId = 0;
+		double RunningDispatchTime = 0.0;
+		/** The running job is past the starvation threshold: new changes do not cancel it, and it may publish as stale. */
+		bool bRunningProtected = false;
+		bool bRunningDynamicUnsupported = false;
+		bool bPublishedDynamicUnsupported = false;
 		TSharedPtr<FCustomNavCancellation, ESPMode::ThreadSafe> RunningCancellation;
 		ECustomNavBuildStatus LastOutcome = ECustomNavBuildStatus::None;
 		uint64 LastOutcomeRevision = 0;
@@ -155,6 +178,10 @@ private:
 	void OnBuildCompleted(FCustomNavBuildResult&& Result);
 	void MarkDirty(FRegionRecord& Record);
 	void EnqueuePending(const FCustomNavRegionKey& Key);
+	void PromoteDeferred();
+	double Now() const;
+	bool IsDue(const FRegionRecord& Record, double Time) const;
+	bool IsStarving(const FRegionRecord& Record, double Time) const;
 	/**
 	 * Collects, validates and dispatches one region. Returns true if a job was launched.
 	 * Takes the key, not a record reference: providers run inside and may re-enter the subsystem.
@@ -167,6 +194,10 @@ private:
 	TArray<FProviderEntry> Providers;
 	TMap<FCustomNavRegionKey, FRegionRecord> Regions;
 	TArray<FCustomNavRegionKey> PendingQueue;
+	/** Overflow of PendingQueue when it is full, FIFO. Each region at most once, so bounded by the region count. */
+	TArray<FCustomNavRegionKey> DeferredQueue;
+	FCustomNavSchedulingPolicy Policy;
+	TFunction<double()> Clock;
 
 	TSharedPtr<FCustomNavBuildExecutor, ESPMode::ThreadSafe> Executor;
 	/** Shared with running jobs; dropped in Deinitialize so late results go nowhere. */

@@ -144,6 +144,11 @@ enum class ECustomNavRegionState : uint8
 	Ready,
 	/** The last build of the desired revision failed. */
 	Failed,
+	/**
+	 * A build is wanted, but the pending queue is full (FCustomNavSchedulingPolicy::MaxPendingRegions).
+	 * The region keeps its place in a FIFO overflow list and moves to Pending when room frees; the change is not lost.
+	 */
+	Deferred,
 };
 
 UENUM(BlueprintType)
@@ -185,6 +190,11 @@ enum class ECustomNavDiagnosticCode : uint8
 	NoWalkableSurface,
 	Cancelled,
 	OutputTooLarge,
+	// Scheduling and dynamic correctness (appended to keep existing values stable)
+	/** A provider cannot report its geometry changes, so the mesh may go out of date without notice. */
+	ProviderChangesNotReported,
+	/** The region kept changing for longer than MaxLatencySeconds; an older but finished build was published as stale. */
+	PublishedUnderChurn,
 };
 
 /** One diagnostic entry. Plain data, safe to copy between threads. */
@@ -335,4 +345,27 @@ struct CUSTOMNAVIGATIONUNREAL_API FCustomNavRegionStatus
 	FCustomNavDiagnostics LastDiagnostics;
 	/** Number of completions dropped because they were obsolete. */
 	int32 DiscardedCompletions = 0;
+	/**
+	 * True if the published mesh was collected while a provider that cannot report changes was registered
+	 * (ICustomNavGeometryProvider::ReportsGeometryChanges() == false). Such a mesh is not guaranteed to follow
+	 * runtime geometry changes: treat it as correct only for static geometry.
+	 */
+	bool bDynamicCorrectnessUnsupported = false;
+};
+
+/**
+ * When dirty regions are built. Defaults are tuning starting points, not measured targets.
+ *
+ * Without starvation: a region that keeps changing still gets a build at least every MaxLatencySeconds,
+ * and once it has gone that long without any published update a running build is no longer cancelled by new
+ * changes; its result is published as stale (bPublishedIsStale) and the newest revision builds next.
+ */
+struct CUSTOMNAVIGATIONUNREAL_API FCustomNavSchedulingPolicy
+{
+	/** A dirty region waits until it has had no new change for this long, so a burst of changes produces one build. */
+	double DebounceSeconds = 0.1;
+	/** ...but never longer than this after its first unbuilt change. Also the starvation threshold (see above). */
+	double MaxLatencySeconds = 1.0;
+	/** Regions allowed in the pending queue at once; more become Deferred (FIFO). 0 = no limit. */
+	int32 MaxPendingRegions = 64;
 };

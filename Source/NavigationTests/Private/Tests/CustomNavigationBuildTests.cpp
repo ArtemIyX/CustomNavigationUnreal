@@ -108,6 +108,8 @@ namespace CustomNavigationTests
 		UCustomNavigationWorldSubsystem* Subsystem = nullptr;
 		TSharedRef<FManualQueue> Queue = MakeShared<FManualQueue>();
 		TSharedPtr<FCustomNavHardcodedGeometryProvider> Provider;
+		/** Fake clock, starts at 0 and moves only when the test sets it. */
+		TSharedRef<double> Time = MakeShared<double>(0.0);
 
 		bool Init(FAutomationTestBase& Test)
 		{
@@ -123,6 +125,11 @@ namespace CustomNavigationTests
 			}
 			Subsystem->SetAutoScheduleForTesting(false);
 			Subsystem->SetBuildExecutorForTesting(MakeManualExecutor(Queue));
+			// Deterministic scheduling: no debounce, frozen clock, so a dirty region is due at once and never starves.
+			Subsystem->SetClockForTesting([Time = Time]() { return *Time; });
+			FCustomNavSchedulingPolicy Policy;
+			Policy.DebounceSeconds = 0.0;
+			Subsystem->SetSchedulingPolicy(Policy);
 			Provider = MakeShared<FCustomNavHardcodedGeometryProvider>();
 			Provider->AddPlane(FVector::ZeroVector, FVector2D(800.0));
 			Subsystem->RegisterGeometryProvider(Provider.ToSharedRef());
@@ -791,6 +798,141 @@ bool FCustomNavCoordinatorFailuresTest::RunTest(const FString& Parameters)
 // ---------------------------------------------------------------------------------------------------------------------
 // Real async path (dedicated build thread + completion queue drained by the ticker)
 // ---------------------------------------------------------------------------------------------------------------------
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavCoordinatorSchedulingTest, "CustomNavigation.Coordinator.Scheduling", CustomNavigationTests::Flags)
+
+bool FCustomNavCoordinatorSchedulingTest::RunTest(const FString& Parameters)
+{
+	using namespace CustomNavigationTests;
+	FCoordinatorEnv Env;
+	if (!Env.Init(*this))
+	{
+		return false;
+	}
+	UCustomNavigationWorldSubsystem& Sub = *Env.Subsystem;
+	double& Time = *Env.Time;
+	const FCustomNavRegionRequest Request = Env.MakeRequest();
+
+	FCustomNavSchedulingPolicy Policy;
+	Policy.DebounceSeconds = 0.1;
+	Policy.MaxLatencySeconds = 1.0;
+	Sub.SetSchedulingPolicy(Policy);
+
+	// --- Debounce: nothing starts until the region has been quiet long enough. ---
+	Time = 0.0;
+	Sub.RequestRegionBuild(Request);
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Debounce: not started at once"), Sub.GetLaunchedJobCount(), 0);
+	Time = 0.05;
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Debounce: not started inside the window"), Sub.GetLaunchedJobCount(), 0);
+	Time = 0.1;
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Debounce: started after the quiet period"), Sub.GetLaunchedJobCount(), 1);
+	Env.RunAll();
+	TestEqual(TEXT("Debounce: ready"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
+
+	// --- Max latency: a change every 50 ms never lets debounce expire, the region still starts after 1 s. ---
+	const double LatencyStart = 10.0;
+	for (int32 Step = 0; Step < 20; ++Step)
+	{
+		Time = LatencyStart + Step * 0.05;
+		Sub.InvalidateAll();
+		Sub.FlushPendingBuilds();
+	}
+	TestEqual(TEXT("Latency: not started while changes keep coming"), Sub.GetLaunchedJobCount(), 1);
+	Time = LatencyStart + 1.0;
+	Sub.InvalidateAll();
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Latency: started at first change + MaxLatency"), Sub.GetLaunchedJobCount(), 2);
+	Env.RunAll();
+	TestEqual(TEXT("Latency: ready"), Sub.GetRegionStatus(Request.Key).State, ECustomNavRegionState::Ready);
+
+	// --- Starvation guard: a running job is not cancelled forever. ---
+	Time = 20.0;
+	Sub.InvalidateAll();
+	Time = 20.1;
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Churn: job A launched"), Sub.GetLaunchedJobCount(), 3);
+	const int32 DiscardedBefore = Sub.GetRegionStatus(Request.Key).DiscardedCompletions;
+	Time = 20.2;
+	Sub.InvalidateAll(); // early change: A is cancelled and its result discarded
+	Env.RunAll();
+	TestEqual(TEXT("Churn: A discarded"), Sub.GetRegionStatus(Request.Key).DiscardedCompletions, DiscardedBefore + 1);
+
+	Time = 20.35;
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Churn: job B launched"), Sub.GetLaunchedJobCount(), 4);
+	const uint64 RevisionB = Sub.GetRegionStatus(Request.Key).DesiredRevision;
+	Time = 21.0;
+	Sub.InvalidateAll(); // the oldest unpublished change is 1 s old: B is protected
+	Env.RunAll();
+	FCustomNavRegionStatus Status = Sub.GetRegionStatus(Request.Key);
+	TestEqual(TEXT("Churn: B not discarded"), Status.DiscardedCompletions, DiscardedBefore + 1);
+	TestEqual(TEXT("Churn: B published"), Status.PublishedRevision, RevisionB);
+	TestTrue(TEXT("Churn: B flagged stale"), Status.bPublishedIsStale);
+	TestEqual(TEXT("Churn: still pending"), Status.State, ECustomNavRegionState::Pending);
+	TestTrue(TEXT("Churn: diagnostic"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::PublishedUnderChurn));
+	TestFalse(TEXT("Churn: no current mesh"), Sub.GetPublishedRegion(Request.Key).IsValid());
+	TestTrue(TEXT("Churn: stale mesh available"), Sub.GetPublishedRegion(Request.Key, true).IsValid());
+
+	Time = 21.2;
+	Sub.FlushPendingBuilds();
+	Env.RunAll();
+	Status = Sub.GetRegionStatus(Request.Key);
+	TestEqual(TEXT("Churn: settles to ready"), Status.State, ECustomNavRegionState::Ready);
+	TestFalse(TEXT("Churn: current"), Status.bPublishedIsStale);
+	Sub.RemoveRegion(Request.Key);
+
+	// --- Pending limit: overflow is Deferred, observable, and promoted in FIFO order. ---
+	Policy.DebounceSeconds = 0.0;
+	Policy.MaxPendingRegions = 2;
+	Sub.SetSchedulingPolicy(Policy);
+	Time = 30.0;
+	const FCustomNavRegionRequest R1 = Env.MakeRequest(TEXT("R1"));
+	const FCustomNavRegionRequest R2 = Env.MakeRequest(TEXT("R2"));
+	const FCustomNavRegionRequest R3 = Env.MakeRequest(TEXT("R3"));
+	Sub.RequestRegionBuild(R1);
+	Sub.RequestRegionBuild(R2);
+	Sub.RequestRegionBuild(R3);
+	TestEqual(TEXT("Limit: two pending"), Sub.NumPendingRegions(), 2);
+	TestEqual(TEXT("Limit: one deferred"), Sub.NumDeferredRegions(), 1);
+	TestEqual(TEXT("Limit: R2 pending"), Sub.GetRegionStatus(R2.Key).State, ECustomNavRegionState::Pending);
+	TestEqual(TEXT("Limit: R3 deferred"), Sub.GetRegionStatus(R3.Key).State, ECustomNavRegionState::Deferred);
+	Sub.RequestRegionBuild(R3); // repeated request does not duplicate it
+	TestEqual(TEXT("Limit: still one deferred"), Sub.NumDeferredRegions(), 1);
+
+	Sub.FlushPendingBuilds();
+	TestEqual(TEXT("Limit: R1 building"), Sub.GetRegionStatus(R1.Key).State, ECustomNavRegionState::Building);
+	TestEqual(TEXT("Limit: R3 promoted"), Sub.GetRegionStatus(R3.Key).State, ECustomNavRegionState::Pending);
+	TestEqual(TEXT("Limit: nothing deferred"), Sub.NumDeferredRegions(), 0);
+	for (int32 Round = 0; Round < 3; ++Round)
+	{
+		Sub.FlushPendingBuilds();
+		Env.RunAll();
+	}
+	TestEqual(TEXT("Limit: R1 ready"), Sub.GetRegionStatus(R1.Key).State, ECustomNavRegionState::Ready);
+	TestEqual(TEXT("Limit: R2 ready"), Sub.GetRegionStatus(R2.Key).State, ECustomNavRegionState::Ready);
+	TestEqual(TEXT("Limit: R3 ready"), Sub.GetRegionStatus(R3.Key).State, ECustomNavRegionState::Ready);
+
+	// --- Providers that do not report changes: the mesh is marked unsupported for dynamic correctness. ---
+	Status = Sub.GetRegionStatus(R1.Key);
+	TestFalse(TEXT("Dynamic: reporting provider is supported"), Status.bDynamicCorrectnessUnsupported);
+	TestFalse(TEXT("Dynamic: no warning"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::ProviderChangesNotReported));
+
+	Env.Provider->SetReportsGeometryChanges(false);
+	Sub.InvalidateAll();
+	for (int32 Round = 0; Round < 3; ++Round)
+	{
+		Sub.FlushPendingBuilds();
+		Env.RunAll();
+	}
+	Status = Sub.GetRegionStatus(R1.Key);
+	TestEqual(TEXT("Dynamic: still builds"), Status.State, ECustomNavRegionState::Ready);
+	TestTrue(TEXT("Dynamic: flagged unsupported"), Status.bDynamicCorrectnessUnsupported);
+	TestTrue(TEXT("Dynamic: warning"), Status.LastDiagnostics.Contains(ECustomNavDiagnosticCode::ProviderChangesNotReported));
+	return true;
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCustomNavAsyncSmokeTest, "CustomNavigation.Coordinator.AsyncSmoke", CustomNavigationTests::Flags)
 

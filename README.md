@@ -69,10 +69,11 @@ Nav->UnregisterGeometryProvider(Handle);   // also invalidates all regions
 ```
 
 Other calls:
-- `GetRegionStatus(Key)` returns `FCustomNavRegionStatus`: state, last outcome, revisions, `bPublishedIsStale`, diagnostics and `DiscardedCompletions`.
+- `GetRegionStatus(Key)` returns `FCustomNavRegionStatus`: state, last outcome, revisions, `bPublishedIsStale`, `bDynamicCorrectnessUnsupported`, diagnostics and `DiscardedCompletions`.
 - `GetPublishedRegion(Key, bAllowStale)`: by default returns nothing while the mesh is older than the desired revision. Pass `true` to keep drawing the last good mesh.
 - `HasRegion`, `GetRegionKeys`, `IsBuildRunning`, `IsClosing`.
-- `FlushPendingBuilds()` starts the next pending build now instead of on the next ticker tick.
+- `FlushPendingBuilds()` starts the next due pending build now instead of on the next ticker tick (debounce still applies).
+- `SetSchedulingPolicy(FCustomNavSchedulingPolicy)`, `NumPendingRegions()`, `NumDeferredRegions()`: see Scheduling below.
 - `ProcessCompletedBuilds(BudgetSeconds = -1)` applies finished builds now instead of on the next ticker tick. Normally not needed.
 
 Rules for requests:
@@ -80,13 +81,29 @@ Rules for requests:
 - An identical request after a failure retries the build.
 - A different request bumps the revision and cancels the running build of that region.
 
+### Scheduling
+
+`FCustomNavSchedulingPolicy` (per world, `SetSchedulingPolicy`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `DebounceSeconds` | 0.1 | A dirty region waits until it has had no new change for this long. |
+| `MaxLatencySeconds` | 1.0 | ...but starts no later than this after its first change, even if changes keep coming. |
+| `MaxPendingRegions` | 64 | Size of the pending queue. Further dirty regions become `Deferred` (0 = no limit). |
+
+Rules:
+- Among due regions the oldest queued starts first. A region still inside its debounce window does not block others. Repeated changes keep a region's place in the queue.
+- **No starvation.** A change normally cancels the running build of that region. Once the region's oldest unpublished change is `MaxLatencySeconds` old, the running build is no longer cancelled. If it finishes while newer changes are pending, its mesh is published **as stale** (`bPublishedIsStale`, warning `PublishedUnderChurn`) and the next build follows. So geometry that changes every frame still gets a fresh mesh about every `MaxLatencySeconds`, readable with `GetPublishedRegion(Key, true)`.
+- **Deferred.** Overflow regions wait in FIFO order with state `Deferred` and move to the pending queue as soon as room frees. Each region is queued at most once, so memory is bounded by the region count.
+
 ### Region states
 
 `ECustomNavRegionState`:
 
 | State | Meaning |
 |---|---|
-| `Pending` | The region is dirty and waiting for the build slot. |
+| `Pending` | The region is dirty and waiting for the build slot (or for its debounce). |
+| `Deferred` | The region is dirty, but the pending queue is full (`MaxPendingRegions`). It waits for room. |
 | `Building` | Its job is running. |
 | `Ready` | The published mesh matches the desired revision. |
 | `Failed` | The last attempt for the desired revision did not succeed. |
@@ -144,11 +161,12 @@ Contract:
 
   Different keys are never deduplicated, so overlapping copies of the same object with different keys are both used.
 - **Changes**: call `InvalidateGeometry(OldBounds)` and `InvalidateGeometry(NewBounds)`, or `InvalidateAll()`. Without this the subsystem never learns a mesh is out of date.
+- **`ReportsGeometryChanges()`**: return `true` only if every change to your geometry is followed by such an invalidation. The default is `false`: the provider is still used, but every build that includes it gets the warning `ProviderChangesNotReported`, and its published mesh has `bDynamicCorrectnessUnsupported = true` (valid for static geometry only).
 - A provider may call back into the subsystem from `CollectGeometry`, for example to invalidate. The subsystem re-checks its state afterwards. If the region's revision changed during collection, the collected data is dropped and collection runs again later.
 - `FCustomNavGeometryCollector` helpers: `AddBox` (12 triangles, outward winding, walkable top) and `AddPlane` (an upward rectangle).
 
 `FCustomNavHardcodedGeometryProvider` is a ready-made provider for tests and samples:
-- Methods: `AddPlane`, `AddBox`, `AddTriangles`, `AddDefaultTestScene(Center, HalfSize)`, `Clear`, `SetFailCollection`.
+- Methods: `AddPlane`, `AddBox`, `AddTriangles`, `AddDefaultTestScene(Center, HalfSize)`, `Clear`, `SetFailCollection`, `SetReportsGeometryChanges` (default `true`).
 - Each `Add*` returns a part id. Ids keep increasing after `Clear()`.
 - After changing it while it is registered, call `InvalidateGeometry` or `InvalidateAll`.
 
@@ -163,7 +181,7 @@ Contract:
 | Completion: discard or publish, then broadcast `OnRegionBuildFinished` | Game (scheduler tick) | Subsystem state |
 
 - **One build thread for all worlds.** `FCustomNavBuildThread` is created on the first build, runs jobs one after another in FIFO order (editor and PIE worlds share it), runs at below-normal priority and sleeps on an event while idle. Without multithreading support (`-nothreading`, some commandlets) jobs run inline.
-- **One build runs at a time per world.** Other dirty regions wait in a FIFO queue. The scheduler is an `FTSTicker` that is armed only while there is pending work, a running job or an undrained result.
+- **One build runs at a time per world.** Other dirty regions wait in a bounded queue (see Scheduling). The scheduler is an `FTSTicker` that is armed only while there is pending work, a running job or an undrained result.
 - **Results are polled, not called back.** Each tick, the subsystem first drains its completion queue, then starts the next pending region. Draining stops after `CustomNav.CompletionBudgetMs` (default 1 ms, `<= 0` = no limit) per world per tick, but at least one result is always applied, so the game thread never does more than that per frame and the queue always makes progress.
 - **The worker owns its input.** The job holds a `TSharedPtr<const FCustomNavBuildSnapshot>` and releases it as soon as Recast finishes. Providers, actors and the world may change or die meanwhile.
 - **Stale results are discarded.** A completion is dropped, and `DiscardedCompletions` is incremented, in any of these cases:
@@ -265,17 +283,19 @@ Close the editor, build the editor target, then run:
 | `CustomNavigation.Coordinator.StaleResult` | Result N discarded after a change, N+1 published, removed region not resurrected |
 | `CustomNavigation.Coordinator.Teardown` | World destroyed during a build; the job runs after the subsystem is garbage collected |
 | `CustomNavigation.Coordinator.Failures` | Invalid settings or geometry (no worker), provider failure and retry, duplicates and conflict, empty input |
+| `CustomNavigation.Coordinator.Scheduling` | Debounce, max latency under constant changes, starvation guard (stale publish), pending limit with `Deferred`, provider without change reports |
 | `CustomNavigation.Coordinator.AsyncSmoke` | Real path: the job runs on the `CustomNavBuild` thread and the ticker applies the result |
 | `CustomNavigation.API.*`, `CustomNavigation.Workflow.*` | Raw Recast and Detour smoke tests |
 
-Coordinator tests swap in a manual executor (`SetBuildExecutorForTesting`, `SetAutoScheduleForTesting(false)`), so the test decides exactly when jobs run (`FManualQueue::RunWorkers`) and when results are applied (`ProcessCompletedBuilds`).
+Coordinator tests swap in a manual executor (`SetBuildExecutorForTesting`, `SetAutoScheduleForTesting(false)`), so the test decides exactly when jobs run (`FManualQueue::RunWorkers`) and when results are applied (`ProcessCompletedBuilds`). They also set a fake clock (`SetClockForTesting`) and zero debounce, so scheduling is deterministic.
 
 ## Limitations and known issues
 
 - **Single region, single tile.** Large worlds need tiling (planned). `MaxGridCells` guards against huge single builds.
 - **No Detour or queries yet.** The output is a polygon mesh for drawing and inspection. Path finding comes with the Detour step.
 - **Geometry only from providers.** There is no automatic collection of static meshes, landscape or collision yet.
-- **One build per world at a time**, and a change cancels the running build of that region. Geometry that changes every frame can therefore starve a region. Debounce such invalidations.
+- **One build thread for the whole process.** Builds of all worlds (editor, PIE clients) run one after another on `CustomNavBuild`; there is no parallelism across cores yet.
+- **One build per world at a time.** Under constant changes a region gets a stale mesh about every `MaxLatencySeconds`, not a current one.
 - **Monolithic (Game target) builds are untested.** The vendored Recast and Detour symbols may clash with the engine's own `Navmesh` module when everything links into one binary. Editor (modular) builds work.
 - Actor rotation is ignored for the debug actor's volume. Only axis-aligned bounds are supported.
 - Cancellation granularity is one Recast stage.

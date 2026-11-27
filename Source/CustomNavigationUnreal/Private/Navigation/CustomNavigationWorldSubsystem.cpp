@@ -16,6 +16,7 @@ namespace CustomNavigationPrivate
 	static std::atomic<uint64> GNextWorldLifetimeId{1};
 
 	static const FName StageCollectName(TEXT("Collect"));
+	static const FName StageScheduleName(TEXT("Schedule"));
 
 	static float GCompletionBudgetMs = 1.0f;
 	static FAutoConsoleVariableRef CVarCompletionBudgetMs(
@@ -70,6 +71,7 @@ void UCustomNavigationWorldSubsystem::Deinitialize()
 	Completions.Reset();
 	Regions.Empty();
 	PendingQueue.Empty();
+	DeferredQueue.Empty();
 	Providers.Empty();
 	ActiveRequestId = 0;
 	ActiveKey = FCustomNavRegionKey();
@@ -153,20 +155,99 @@ void UCustomNavigationWorldSubsystem::InvalidateAll()
 
 void UCustomNavigationWorldSubsystem::MarkDirty(FRegionRecord& Record)
 {
+	const double Time = Now();
 	++Record.DesiredRevision;
-	Record.bPending = true;
-	// A running job is now building an obsolete revision; stop it early, its completion will be discarded.
-	if (Record.RunningCancellation.IsValid())
+	if (!Record.bPending)
 	{
-		Record.RunningCancellation->Cancel();
+		Record.FirstDirtyTime = Time;
+	}
+	Record.LastDirtyTime = Time;
+	Record.bPending = true;
+	if (!Record.OldestUnpublishedChangeTime.IsSet())
+	{
+		Record.OldestUnpublishedChangeTime = Time;
+	}
+
+	// A running job is now building an obsolete revision. Normally stop it early (its completion will be discarded),
+	// but not when the region has gone too long without any update: then let it finish and publish it as stale.
+	if (Record.RunningCancellation.IsValid() && !Record.bRunningProtected)
+	{
+		if (IsStarving(Record, Time))
+		{
+			Record.bRunningProtected = true;
+		}
+		else
+		{
+			Record.RunningCancellation->Cancel();
+		}
 	}
 	EnqueuePending(Record.Key);
 }
 
 void UCustomNavigationWorldSubsystem::EnqueuePending(const FCustomNavRegionKey& Key)
 {
-	PendingQueue.AddUnique(Key);
+	FRegionRecord* Record = Regions.Find(Key);
+	if (!Record || PendingQueue.Contains(Key) || DeferredQueue.Contains(Key))
+	{
+		// Already queued: it keeps its place, so repeated changes cannot push it to the back.
+		EnsureTicker();
+		return;
+	}
+	if (Policy.MaxPendingRegions > 0 && PendingQueue.Num() >= Policy.MaxPendingRegions)
+	{
+		Record->bDeferred = true;
+		DeferredQueue.Add(Key);
+		UE_LOG(LogCustomNavigation, Verbose, TEXT("Region %s deferred: %d regions already pending (limit %d)"),
+		       *Key.ToString(), PendingQueue.Num(), Policy.MaxPendingRegions);
+	}
+	else
+	{
+		Record->bDeferred = false;
+		PendingQueue.Add(Key);
+	}
 	EnsureTicker();
+}
+
+void UCustomNavigationWorldSubsystem::PromoteDeferred()
+{
+	while (DeferredQueue.Num() > 0 && (Policy.MaxPendingRegions <= 0 || PendingQueue.Num() < Policy.MaxPendingRegions))
+	{
+		const FCustomNavRegionKey Key = DeferredQueue[0];
+		DeferredQueue.RemoveAt(0);
+		if (FRegionRecord* Record = Regions.Find(Key))
+		{
+			Record->bDeferred = false;
+			if (Record->bPending)
+			{
+				PendingQueue.Add(Key);
+			}
+		}
+	}
+}
+
+double UCustomNavigationWorldSubsystem::Now() const
+{
+	return Clock ? Clock() : FPlatformTime::Seconds();
+}
+
+bool UCustomNavigationWorldSubsystem::IsDue(const FRegionRecord& Record, double Time) const
+{
+	return Time - Record.LastDirtyTime >= Policy.DebounceSeconds || Time - Record.FirstDirtyTime >= Policy.MaxLatencySeconds;
+}
+
+bool UCustomNavigationWorldSubsystem::IsStarving(const FRegionRecord& Record, double Time) const
+{
+	return Record.OldestUnpublishedChangeTime.IsSet() && Time - Record.OldestUnpublishedChangeTime.GetValue() >= Policy.MaxLatencySeconds;
+}
+
+void UCustomNavigationWorldSubsystem::SetSchedulingPolicy(const FCustomNavSchedulingPolicy& InPolicy)
+{
+	check(IsInGameThread());
+	Policy = InPolicy;
+	Policy.DebounceSeconds = FMath::Max(0.0, Policy.DebounceSeconds);
+	Policy.MaxLatencySeconds = FMath::Max(0.0, Policy.MaxLatencySeconds);
+	Policy.MaxPendingRegions = FMath::Max(0, Policy.MaxPendingRegions);
+	PromoteDeferred();
 }
 
 void UCustomNavigationWorldSubsystem::EnsureTicker()
@@ -195,7 +276,7 @@ bool UCustomNavigationWorldSubsystem::TickScheduler(float DeltaTime)
 	FlushPendingBuilds();
 
 	// Keep ticking while there is anything to start, to wait for, or to apply; new requests re-arm the ticker.
-	if (PendingQueue.Num() == 0 && ActiveRequestId == 0 && !HasUndrainedResults())
+	if (PendingQueue.Num() == 0 && DeferredQueue.Num() == 0 && ActiveRequestId == 0 && !HasUndrainedResults())
 	{
 		TickerHandle.Reset();
 		return false;
@@ -277,6 +358,8 @@ void UCustomNavigationWorldSubsystem::RemoveRegion(const FCustomNavRegionKey& Ke
 		Regions.Remove(Key);
 	}
 	PendingQueue.Remove(Key);
+	DeferredQueue.Remove(Key);
+	PromoteDeferred();
 }
 
 FCustomNavRegionStatus UCustomNavigationWorldSubsystem::GetRegionStatus(const FCustomNavRegionKey& Key) const
@@ -314,15 +397,35 @@ FCustomNavRegionMeshPtr UCustomNavigationWorldSubsystem::GetPublishedRegion(cons
 void UCustomNavigationWorldSubsystem::FlushPendingBuilds()
 {
 	check(IsInGameThread());
-	while (!bClosing && ActiveRequestId == 0 && PendingQueue.Num() > 0)
+	while (!bClosing && ActiveRequestId == 0)
 	{
-		const FCustomNavRegionKey Key = PendingQueue[0];
-		PendingQueue.RemoveAt(0);
-		const FRegionRecord* Record = Regions.Find(Key);
-		if (!Record || !Record->bPending)
+		PromoteDeferred();
+
+		// The oldest queued region that is due goes first; one still inside its debounce window does not block others.
+		const double Time = Now();
+		int32 DueIndex = INDEX_NONE;
+		for (int32 Index = 0; Index < PendingQueue.Num(); ++Index)
 		{
-			continue;
+			const FRegionRecord* Record = Regions.Find(PendingQueue[Index]);
+			if (!Record || !Record->bPending)
+			{
+				PendingQueue.RemoveAt(Index--);
+				continue;
+			}
+			if (IsDue(*Record, Time))
+			{
+				DueIndex = Index;
+				break;
+			}
 		}
+		if (DueIndex == INDEX_NONE)
+		{
+			break;
+		}
+		const FCustomNavRegionKey Key = PendingQueue[DueIndex];
+		PendingQueue.RemoveAt(DueIndex);
+		// The freed slot goes to the oldest deferred region right away, so its state reads Pending, not Deferred.
+		PromoteDeferred();
 		TryStartBuild(Key);
 	}
 }
@@ -359,9 +462,17 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 	});
 
 	bool bCollectFailed = false;
+	bool bDynamicUnsupported = false;
 	for (const FProviderEntry& Entry : Ordered)
 	{
 		const FString Name = Entry.Provider->GetDebugName();
+		if (!Entry.Provider->ReportsGeometryChanges())
+		{
+			// Even a provider with nothing in this region could add geometry here later without telling us.
+			bDynamicUnsupported = true;
+			Diagnostics.Warning(ECustomNavDiagnosticCode::ProviderChangesNotReported, StageCollectName,
+			                    TEXT("Provider does not report geometry changes; the result is valid for static geometry only"), Name);
+		}
 		Collector.SetCurrentProvider(Name, Entry.Priority);
 		if (Entry.Provider->CollectGeometry(GeometryRequest, Collector, Diagnostics) == ECustomNavCollectStatus::Failed)
 		{
@@ -408,8 +519,13 @@ bool UCustomNavigationWorldSubsystem::TryStartBuild(const FCustomNavRegionKey& K
 
 	// --- Dispatch ---
 	TSharedRef<FCustomNavCancellation, ESPMode::ThreadSafe> Cancellation = MakeShared<FCustomNavCancellation, ESPMode::ThreadSafe>();
+	const double DispatchTime = Now();
 	Record->RunningRequestId = Token.RequestId;
 	Record->RunningCancellation = Cancellation;
+	Record->RunningDispatchTime = DispatchTime;
+	// A region that already waited past the latency limit (long queue, deferral, churn) must not be cancelled again.
+	Record->bRunningProtected = IsStarving(*Record, DispatchTime);
+	Record->bRunningDynamicUnsupported = bDynamicUnsupported;
 	Record->RunningCollectDiagnostics = MoveTemp(Diagnostics);
 	ActiveRequestId = Token.RequestId;
 	ActiveKey = Key;
@@ -460,15 +576,54 @@ void UCustomNavigationWorldSubsystem::OnBuildCompleted(FCustomNavBuildResult&& R
 
 	const bool bIsRunningJob = Record->RunningRequestId == Token.RequestId;
 	FCustomNavDiagnostics CollectDiagnostics;
+	bool bWasProtected = false;
+	bool bDynamicUnsupported = false;
 	if (bIsRunningJob)
 	{
 		Record->RunningRequestId = 0;
 		Record->RunningCancellation.Reset();
 		CollectDiagnostics = MoveTemp(Record->RunningCollectDiagnostics);
 		Record->RunningCollectDiagnostics = FCustomNavDiagnostics();
+		bWasProtected = Record->bRunningProtected;
+		Record->bRunningProtected = false;
+		bDynamicUnsupported = Record->bRunningDynamicUnsupported;
 	}
 
-	if (!bIsRunningJob || Token.DesiredRevision != Record->DesiredRevision || Result.Status == ECustomNavBuildStatus::Cancelled)
+	// Starvation guard: an obsolete but successful build of a region that has been changing for too long replaces an
+	// older published mesh, flagged stale. Consumers asking for current data still get nothing until the newest
+	// revision is built; those that accept stale data get progressively fresher meshes instead of none.
+	const bool bObsolete = Token.DesiredRevision != Record->DesiredRevision;
+	const uint64 PublishedRevisionNow = Record->Published.IsValid() ? Record->PublishedRevision : 0;
+	if (bIsRunningJob && bObsolete && bWasProtected && Result.Status == ECustomNavBuildStatus::Success && Result.Mesh.IsValid()
+		&& Token.DesiredRevision > PublishedRevisionNow)
+	{
+		CollectDiagnostics.Append(Result.Diagnostics);
+		CollectDiagnostics.Warning(ECustomNavDiagnosticCode::PublishedUnderChurn, CustomNavigationPrivate::StageScheduleName, FString::Printf(
+			TEXT("Region kept changing for over %.2f s; published revision %llu as stale while revision %llu is pending"),
+			Policy.MaxLatencySeconds, Token.DesiredRevision, Record->DesiredRevision));
+		Record->Published = Result.Mesh;
+		Record->PublishedRevision = Token.DesiredRevision;
+		Record->bPublishedDynamicUnsupported = bDynamicUnsupported;
+		Record->LastOutcome = Result.Status;
+		Record->LastOutcomeRevision = Token.DesiredRevision;
+		Record->LastDiagnostics = MoveTemp(CollectDiagnostics);
+		// Everything changed after collection started is still missing from the mesh.
+		Record->OldestUnpublishedChangeTime = Record->RunningDispatchTime;
+		UE_LOG(LogCustomNavigation, Log, TEXT("Region %s under churn: published rev %llu as stale (desired %llu)"),
+		       *Token.Key.ToString(), Token.DesiredRevision, Record->DesiredRevision);
+
+		const FCustomNavRegionKey Key = Record->Key;
+		const FCustomNavRegionStatus Status = MakeStatus(*Record);
+		if (Record->bPending)
+		{
+			EnqueuePending(Key);
+		}
+		Record = nullptr; // listeners may modify the region map
+		OnRegionBuildFinished.Broadcast(Key, Status);
+		return;
+	}
+
+	if (!bIsRunningJob || bObsolete || Result.Status == ECustomNavBuildStatus::Cancelled)
 	{
 		++Record->DiscardedCompletions;
 		UE_LOG(LogCustomNavigation, Verbose, TEXT("Discard %s: obsolete (desired revision is %llu)"), *Token.ToString(), Record->DesiredRevision);
@@ -483,11 +638,14 @@ void UCustomNavigationWorldSubsystem::OnBuildCompleted(FCustomNavBuildResult&& R
 	Record->LastOutcome = Result.Status;
 	Record->LastOutcomeRevision = Token.DesiredRevision;
 	Record->LastDiagnostics = MoveTemp(CollectDiagnostics);
+	// The desired revision has a final outcome: nothing is waiting any more.
+	Record->OldestUnpublishedChangeTime.Reset();
 
 	if (Result.Status == ECustomNavBuildStatus::Success && Result.Mesh.IsValid())
 	{
 		Record->Published = Result.Mesh;
 		Record->PublishedRevision = Token.DesiredRevision;
+		Record->bPublishedDynamicUnsupported = bDynamicUnsupported;
 		UE_LOG(LogCustomNavigation, Log, TEXT("Built region %s rev %llu: %d polys, %d detail tris in %.2f ms"),
 		       *Token.Key.ToString(), Token.DesiredRevision, Result.Mesh->NumPolygons(), Result.Mesh->DetailTriangles.Num() / 3, Result.TotalBuildMs);
 	}
@@ -516,6 +674,7 @@ void UCustomNavigationWorldSubsystem::FinishWithoutWorker(FRegionRecord& Record,
 	Record.LastOutcome = Status;
 	Record.LastOutcomeRevision = Record.DesiredRevision;
 	Record.LastDiagnostics = MoveTemp(Diagnostics);
+	Record.OldestUnpublishedChangeTime.Reset();
 
 	const FCustomNavDiagnostic* FirstError = Record.LastDiagnostics.FirstError();
 	UE_LOG(LogCustomNavigation, Warning, TEXT("Region %s rev %llu not built: %s%s%s"),
@@ -538,6 +697,7 @@ FCustomNavRegionStatus UCustomNavigationWorldSubsystem::MakeStatus(const FRegion
 	Status.bPublishedIsStale = Record.Published.IsValid() && Record.PublishedRevision != Record.DesiredRevision;
 	Status.LastDiagnostics = Record.LastDiagnostics;
 	Status.DiscardedCompletions = Record.DiscardedCompletions;
+	Status.bDynamicCorrectnessUnsupported = Record.Published.IsValid() && Record.bPublishedDynamicUnsupported;
 	return Status;
 }
 
@@ -545,7 +705,7 @@ ECustomNavRegionState UCustomNavigationWorldSubsystem::ComputeState(const FRegio
 {
 	if (Record.bPending)
 	{
-		return ECustomNavRegionState::Pending;
+		return Record.bDeferred ? ECustomNavRegionState::Deferred : ECustomNavRegionState::Pending;
 	}
 	if (Record.RunningRequestId != 0)
 	{

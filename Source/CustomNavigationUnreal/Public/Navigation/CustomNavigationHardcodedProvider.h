@@ -40,6 +40,12 @@ public:
 	                                                FCustomNavGeometryCollector& Collector,
 	                                                FCustomNavDiagnostics& Diagnostics) override;
 	virtual FString GetDebugName() const override;
+	/**
+	 * The geometry changes only through this class's API, and whoever calls it invalidates the subsystem,
+	 * so changes are reported. Tests can turn this off to simulate a provider that cannot report changes.
+	 */
+	virtual bool ReportsGeometryChanges() const override { return bReportsChanges; }
+	void SetReportsGeometryChanges(bool bInReports) { bReportsChanges = bInReports; }
 
 private:
 	struct FShape
@@ -57,4 +63,5 @@ private:
 	uint32 NextPartId = 1;
 	uint64 Revision = 1;
 	bool bFailCollection = false;
+	bool bReportsChanges = true;
 };

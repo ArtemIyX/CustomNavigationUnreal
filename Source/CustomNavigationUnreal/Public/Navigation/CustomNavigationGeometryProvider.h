@@ -117,7 +117,8 @@ enum class ECustomNavCollectStatus : uint8
  *
  * Change notification: when a provider's geometry changes it must call
  * UCustomNavigationWorldSubsystem::InvalidateGeometry with the old and new bounds (or InvalidateAll).
- * Without that the coordinator cannot know a published mesh is out of date.
+ * Without that the coordinator cannot know a published mesh is out of date. This is a correctness contract:
+ * a provider that cannot keep it must say so through ReportsGeometryChanges().
  */
 class CUSTOMNAVIGATIONUNREAL_API ICustomNavGeometryProvider
 {
@@ -129,6 +130,13 @@ public:
 	                                                FCustomNavDiagnostics& Diagnostics) = 0;
 
 	virtual FString GetDebugName() const { return TEXT("GeometryProvider"); }
+
+	/**
+	 * True only if every change of this provider's geometry is reported through InvalidateGeometry / InvalidateAll.
+	 * Defaults to false: the coordinator then still builds, but adds a ProviderChangesNotReported warning and flags
+	 * the result bDynamicCorrectnessUnsupported instead of silently presenting possibly stale data as current.
+	 */
+	virtual bool ReportsGeometryChanges() const { return false; }
 };
 
 /** Opaque registration id returned by RegisterGeometryProvider. */
