@@ -50,6 +50,9 @@ DebugGame/
 Development/
 Shipping/
 Test/
+# ...except these source folders, which share the name "Debug" (navmesh debug drawing)
+!/Source/CustomNavigationUnreal/Public/Navigation/Debug/
+!/Source/CustomNavigationUnreal/Private/Navigation/Debug/
 
 # =========================
 # Rider / JetBrains (.idea)

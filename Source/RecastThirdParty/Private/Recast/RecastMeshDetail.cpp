@@ -800,6 +800,13 @@ static bool buildPolyDetail(rcContext* ctx, const float* in, const int nin,
 			}
 		}
 	}
+	else
+	{
+		// CustomNavigationUnreal fix: without edge sampling the hull is just the input polygon.
+		// Upstream left it empty, and triangulateHull then read hull[-1].
+		for (int i = 0; i < nin; ++i)
+			hull[nhull++] = i;
+	}
 	
 	// If the polygon minimum extent is small (sliver or small triangle), do not try to add internal points.
 	if (minExtent < sampleDist*2)
